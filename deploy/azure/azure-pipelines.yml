@@ -1,0 +1,81 @@
+trigger:
+  branches:
+    include:
+      - main
+
+variables:
+  resourceGroup: 'rg-scrum-agent'
+  acrName: 'scrumacr'
+  acaEnv: 'scrum-agent-env'
+  backendApp: 'scrum-agent-backend'
+  frontendApp: 'scrum-agent-frontend'
+
+stages:
+  - stage: Build
+    displayName: Build & Push Images
+    jobs:
+      - job: BuildPush
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: AzureCLI@2
+            displayName: Build and push backend
+            inputs:
+              azureSubscription: 'AzureServiceConnection'
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                ACR_LOGIN=$(az acr show --name $(acrName) --query loginServer -o tsv)
+                az acr login --name $(acrName)
+                docker build -t $ACR_LOGIN/$(backendApp):$(Build.BuildId) ./backend
+                docker push $ACR_LOGIN/$(backendApp):$(Build.BuildId)
+
+          - task: AzureCLI@2
+            displayName: Build and push frontend
+            inputs:
+              azureSubscription: 'AzureServiceConnection'
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                ACR_LOGIN=$(az acr show --name $(acrName) --query loginServer -o tsv)
+                az acr login --name $(acrName)
+                docker build -t $ACR_LOGIN/$(frontendApp):$(Build.BuildId) ./frontend
+                docker push $ACR_LOGIN/$(frontendApp):$(Build.BuildId)
+
+  - stage: Deploy
+    displayName: Deploy to Azure Container Apps
+    dependsOn: Build
+    jobs:
+      - deployment: DeployACA
+        environment: production
+        pool:
+          vmImage: ubuntu-latest
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureCLI@2
+                  displayName: Update backend
+                  inputs:
+                    azureSubscription: 'AzureServiceConnection'
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      ACR_LOGIN=$(az acr show --name $(acrName) --query loginServer -o tsv)
+                      az containerapp update \
+                        --name $(backendApp) \
+                        --resource-group $(resourceGroup) \
+                        --image $ACR_LOGIN/$(backendApp):$(Build.BuildId)
+
+                - task: AzureCLI@2
+                  displayName: Update frontend
+                  inputs:
+                    azureSubscription: 'AzureServiceConnection'
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      ACR_LOGIN=$(az acr show --name $(acrName) --query loginServer -o tsv)
+                      az containerapp update \
+                        --name $(frontendApp) \
+                        --resource-group $(resourceGroup) \
+                        --image $ACR_LOGIN/$(frontendApp):$(Build.BuildId)
