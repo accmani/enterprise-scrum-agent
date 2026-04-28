@@ -1,0 +1,2 @@
+if (deductible >= 0) { // Corrected condition to include exact deductible met case
+}
