@@ -1,14 +1,16 @@
 from pydantic_settings import BaseSettings
-from typing import Optional
 
 
 class Settings(BaseSettings):
-    # OpenAI
-    openai_api_key: str = ""
-    openai_model: str = "gpt-4o"
+    # Azure OpenAI
     azure_openai_endpoint: str = ""
     azure_openai_api_key: str = ""
-    azure_openai_deployment: str = "gpt-4o"
+    azure_openai_deployment: str = "gpt-4o-mini"
+    openai_api_version: str = "2024-02-01"
+
+    # Fallback OpenAI
+    openai_api_key: str = ""
+    openai_model: str = "gpt-4o-mini"
 
     # Database
     database_url: str = "sqlite+aiosqlite:///./scrum_agent.db"
@@ -22,7 +24,11 @@ class Settings(BaseSettings):
     jira_url: str = ""
     jira_username: str = ""
     jira_api_token: str = ""
-    jira_project_key: str = "SCRUM"
+    jira_project_key: str = "KAN"
+
+    # GitHub
+    github_token: str = ""
+    github_repo: str = ""
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

@@ -2,15 +2,35 @@ trigger:
   branches:
     include:
       - main
+  paths:
+    exclude:
+      - '**.md'
+      - '.claude/**'
 
 variables:
   resourceGroup: 'rg-scrum-agent'
-  acrName: 'scrumacr'
+  acrName: 'scrumacr'           # must match the ACR created by Bicep (or override in variable group)
   acaEnv: 'scrum-agent-env'
   backendApp: 'scrum-agent-backend'
   frontendApp: 'scrum-agent-frontend'
+  imageTag: $(Build.BuildId)
+
+# Create a variable group called "scrum-agent-secrets" in Azure DevOps Pipelines → Library
+# Required variables:
+#   OPENAI_API_KEY            (secret)
+#   AZURE_OPENAI_ENDPOINT
+#   AZURE_OPENAI_DEPLOYMENT
+#   JIRA_URL                  e.g. https://your-org.atlassian.net/
+#   JIRA_USERNAME             e.g. your@email.com
+#   JIRA_API_TOKEN            (secret)
+#   JIRA_PROJECT_KEY          e.g. ST
+#   GITHUB_TOKEN              (secret)
+#   GITHUB_REPO               e.g. org/repo-name
+# Reference: https://learn.microsoft.com/azure/devops/pipelines/library/variable-groups
+- group: scrum-agent-secrets
 
 stages:
+  # ── Stage 1: Build & push both images ────────────────────────────────────────
   - stage: Build
     displayName: Build & Push Images
     jobs:
@@ -19,29 +39,43 @@ stages:
           vmImage: ubuntu-latest
         steps:
           - task: AzureCLI@2
-            displayName: Build and push backend
+            displayName: Build & push backend
             inputs:
               azureSubscription: 'AzureServiceConnection'
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
+                set -euo pipefail
                 ACR_LOGIN=$(az acr show --name $(acrName) --query loginServer -o tsv)
                 az acr login --name $(acrName)
-                docker build -t $ACR_LOGIN/$(backendApp):$(Build.BuildId) ./backend
-                docker push $ACR_LOGIN/$(backendApp):$(Build.BuildId)
+                docker build \
+                  --tag $ACR_LOGIN/$(backendApp):$(imageTag) \
+                  --tag $ACR_LOGIN/$(backendApp):latest \
+                  ./backend
+                docker push $ACR_LOGIN/$(backendApp):$(imageTag)
+                docker push $ACR_LOGIN/$(backendApp):latest
+                echo "##vso[task.setvariable variable=ACR_LOGIN;isOutput=true]$ACR_LOGIN"
+              name: buildBackend
 
           - task: AzureCLI@2
-            displayName: Build and push frontend
+            displayName: Build & push frontend
             inputs:
               azureSubscription: 'AzureServiceConnection'
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
+                set -euo pipefail
                 ACR_LOGIN=$(az acr show --name $(acrName) --query loginServer -o tsv)
                 az acr login --name $(acrName)
-                docker build -t $ACR_LOGIN/$(frontendApp):$(Build.BuildId) ./frontend
-                docker push $ACR_LOGIN/$(frontendApp):$(Build.BuildId)
+                # No build args needed — api.ts uses relative /api paths; nginx handles proxy
+                docker build \
+                  --tag $ACR_LOGIN/$(frontendApp):$(imageTag) \
+                  --tag $ACR_LOGIN/$(frontendApp):latest \
+                  ./frontend
+                docker push $ACR_LOGIN/$(frontendApp):$(imageTag)
+                docker push $ACR_LOGIN/$(frontendApp):latest
 
+  # ── Stage 2: Deploy to Azure Container Apps ────────────────────────────────
   - stage: Deploy
     displayName: Deploy to Azure Container Apps
     dependsOn: Build
@@ -55,27 +89,104 @@ stages:
             deploy:
               steps:
                 - task: AzureCLI@2
-                  displayName: Update backend
+                  displayName: Refresh backend secrets
                   inputs:
                     azureSubscription: 'AzureServiceConnection'
                     scriptType: bash
                     scriptLocation: inlineScript
                     inlineScript: |
+                      set -euo pipefail
+                      az containerapp secret set \
+                        --name $(backendApp) \
+                        --resource-group $(resourceGroup) \
+                        --secrets \
+                          "openai-key=$(OPENAI_API_KEY)" \
+                          "jira-token=$(JIRA_API_TOKEN)" \
+                          "github-token=$(GITHUB_TOKEN)"
+
+                - task: AzureCLI@2
+                  displayName: Update backend image
+                  inputs:
+                    azureSubscription: 'AzureServiceConnection'
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -euo pipefail
                       ACR_LOGIN=$(az acr show --name $(acrName) --query loginServer -o tsv)
                       az containerapp update \
                         --name $(backendApp) \
                         --resource-group $(resourceGroup) \
-                        --image $ACR_LOGIN/$(backendApp):$(Build.BuildId)
+                        --image $ACR_LOGIN/$(backendApp):$(imageTag) \
+                        --set-env-vars \
+                          "OPENAI_API_KEY=secretref:openai-key" \
+                          "AZURE_OPENAI_API_KEY=secretref:openai-key" \
+                          "AZURE_OPENAI_ENDPOINT=$(AZURE_OPENAI_ENDPOINT)" \
+                          "AZURE_OPENAI_DEPLOYMENT=$(AZURE_OPENAI_DEPLOYMENT)" \
+                          "OPENAI_API_VERSION=2024-02-01" \
+                          "JIRA_URL=$(JIRA_URL)" \
+                          "JIRA_USERNAME=$(JIRA_USERNAME)" \
+                          "JIRA_API_TOKEN=secretref:jira-token" \
+                          "JIRA_PROJECT_KEY=$(JIRA_PROJECT_KEY)" \
+                          "GITHUB_TOKEN=secretref:github-token" \
+                          "GITHUB_REPO=$(GITHUB_REPO)" \
+                          "DATABASE_URL=sqlite+aiosqlite:///./scrum_agent.db" \
+                          "CORS_ORIGINS=*"
 
                 - task: AzureCLI@2
-                  displayName: Update frontend
+                  displayName: Update frontend image
                   inputs:
                     azureSubscription: 'AzureServiceConnection'
                     scriptType: bash
                     scriptLocation: inlineScript
                     inlineScript: |
+                      set -euo pipefail
                       ACR_LOGIN=$(az acr show --name $(acrName) --query loginServer -o tsv)
                       az containerapp update \
                         --name $(frontendApp) \
                         --resource-group $(resourceGroup) \
-                        --image $ACR_LOGIN/$(frontendApp):$(Build.BuildId)
+                        --image $ACR_LOGIN/$(frontendApp):$(imageTag)
+
+                # ── Smoke tests ───────────────────────────────────────────────
+                - task: AzureCLI@2
+                  displayName: Smoke test — backend /health
+                  inputs:
+                    azureSubscription: 'AzureServiceConnection'
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -euo pipefail
+                      # Backend has internal ingress — check via the frontend's /health proxy
+                      FRONTEND_FQDN=$(az containerapp show \
+                        --name $(frontendApp) \
+                        --resource-group $(resourceGroup) \
+                        --query "properties.configuration.ingress.fqdn" -o tsv)
+                      echo "Frontend URL: https://$FRONTEND_FQDN"
+
+                      # Retry for up to 3 minutes (new revision cold-start)
+                      for i in {1..18}; do
+                        STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+                          --max-time 10 "https://$FRONTEND_FQDN/health" || echo "000")
+                        echo "Attempt $i — HTTP $STATUS"
+                        if [ "$STATUS" = "200" ]; then
+                          echo "Health check passed"
+                          echo "##vso[task.setvariable variable=FRONTEND_URL]https://$FRONTEND_FQDN"
+                          exit 0
+                        fi
+                        sleep 10
+                      done
+                      echo "Health check timed out" && exit 1
+
+                - task: AzureCLI@2
+                  displayName: Print deployment URLs
+                  inputs:
+                    azureSubscription: 'AzureServiceConnection'
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      FRONTEND_FQDN=$(az containerapp show \
+                        --name $(frontendApp) \
+                        --resource-group $(resourceGroup) \
+                        --query "properties.configuration.ingress.fqdn" -o tsv)
+                      echo "##vso[task.logissue type=warning]Deployed: https://$FRONTEND_FQDN"
+                      echo "Frontend: https://$FRONTEND_FQDN"
+                      echo "API:      https://$FRONTEND_FQDN/api/"

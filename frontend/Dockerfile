@@ -4,6 +4,7 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 COPY . .
+# api.ts uses relative /api paths; nginx proxies to scrum-agent-backend — no absolute URL needed
 RUN npm run build
 
 # Stage 2: Serve with nginx

@@ -1,45 +1,108 @@
 from langchain.tools import BaseTool
 from pydantic import BaseModel, Field
+from app.config import settings
 import json
+import base64
+import httpx
 
 
-class EstimationInput(BaseModel):
-    story_description: str = Field(description="The user story description to estimate")
+class EstimationQueryInput(BaseModel):
+    query: str = Field(description="Story or feature to estimate effort for")
 
 
 class EstimationTool(BaseTool):
-    name: str = "story_estimator"
+    name: str = "estimation_tool"
     description: str = (
-        "Estimates story points for a user story using Planning Poker / T-shirt sizing. "
-        "Provide the story title or description and receive an estimate with rationale."
+        "Estimate story points and effort for user stories. Uses historical Jira data "
+        "for velocity-based estimates. Use when asked to estimate, size, or point a story."
     )
-    args_schema: type[BaseModel] = EstimationInput
+    args_schema: type[BaseModel] = EstimationQueryInput
 
-    def _run(self, story_description: str) -> str:
-        return self._estimate(story_description)
+    def _run(self, query: str) -> str:
+        return self._execute(query)
 
-    async def _arun(self, story_description: str) -> str:
-        return self._estimate(story_description)
+    async def _arun(self, query: str) -> str:
+        return self._execute(query)
 
-    def _estimate(self, story_description: str) -> str:
-        desc = story_description.lower()
-        # Heuristic estimation based on complexity keywords
-        if any(k in desc for k in ["integration", "payment", "oauth", "sso", "auth"]):
-            points, size = 8, "L"
-        elif any(k in desc for k in ["ui", "form", "page", "display", "show"]):
-            points, size = 3, "S"
-        elif any(k in desc for k in ["api", "endpoint", "crud", "database"]):
-            points, size = 5, "M"
-        elif any(k in desc for k in ["report", "export", "chart", "analytics"]):
-            points, size = 8, "L"
-        else:
-            points, size = 5, "M"
+    def _get_historical_velocity(self) -> dict:
+        if not settings.jira_url or not settings.jira_api_token:
+            return {}
+        try:
+            credentials = base64.b64encode(
+                f"{settings.jira_username}:{settings.jira_api_token}".encode()
+            ).decode()
+            headers = {
+                "Authorization": f"Basic {credentials}",
+                "Content-Type": "application/json",
+            }
+            base_url = settings.jira_url.rstrip("/")
+            # Get completed issues with story points
+            response = httpx.get(
+                f"{base_url}/rest/api/3/search/jql",
+                headers=headers,
+                params={
+                    "jql": f"project={settings.jira_project_key} AND status=Done AND cf[10016] is not EMPTY",
+                    "maxResults": 20,
+                    "fields": "summary,customfield_10016,issuetype",
+                },
+                timeout=15,
+            )
+            issues = response.json().get("issues", [])
+            points = [i["fields"].get("customfield_10016", 0) for i in issues if i["fields"].get("customfield_10016")]
+            return {
+                "completed_issues": len(issues),
+                "avg_points": round(sum(points) / len(points), 1) if points else 5,
+                "point_distribution": {
+                    "1-2 pts": len([p for p in points if p <= 2]),
+                    "3-5 pts": len([p for p in points if 3 <= p <= 5]),
+                    "8+ pts": len([p for p in points if p >= 8]),
+                }
+            }
+        except Exception:
+            return {}
 
-        return json.dumps({
-            "story_points": points,
-            "t_shirt_size": size,
-            "confidence": "medium",
-            "rationale": f"Based on keywords in description, estimated {points} points ({size}). "
-                         f"Recommend team Planning Poker session to validate.",
-            "fibonacci_options": [3, 5, 8],
-        })
+    def _execute(self, query: str) -> str:
+        try:
+            velocity_data = self._get_historical_velocity()
+            q = query.lower()
+
+            # Size estimation based on complexity keywords
+            if any(w in q for w in ["simple", "small", "minor", "trivial", "fix"]):
+                points = 1
+                size = "XS"
+            elif any(w in q for w in ["login", "form", "button", "display", "show", "page"]):
+                points = 2
+                size = "S"
+            elif any(w in q for w in ["api", "endpoint", "service", "integration", "report"]):
+                points = 5
+                size = "M"
+            elif any(w in q for w in ["payment", "auth", "security", "migration", "refactor"]):
+                points = 8
+                size = "L"
+            elif any(w in q for w in ["architecture", "platform", "infrastructure", "redesign"]):
+                points = 13
+                size = "XL"
+            else:
+                points = 3
+                size = "S"
+
+            result = {
+                "story": query,
+                "estimated_points": points,
+                "size": size,
+                "confidence": "medium",
+                "breakdown": {
+                    "development": f"{int(points * 0.6)} pts",
+                    "testing": f"{int(points * 0.25)} pts",
+                    "review": f"{int(points * 0.15)} pts",
+                },
+            }
+
+            if velocity_data:
+                result["historical_context"] = velocity_data
+                result["sprints_to_complete"] = round(points / max(velocity_data.get("avg_points", 5), 1), 1)
+
+            return json.dumps(result)
+
+        except Exception as e:
+            return json.dumps({"error": str(e)})

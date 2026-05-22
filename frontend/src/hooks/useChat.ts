@@ -2,12 +2,12 @@ import { useState, useCallback } from 'react';
 import { chatApi } from '../services/api';
 import type { Message } from '../types';
 
-export function useChat() {
+export function useChat(persona?: string) {
   const [messages, setMessages] = useState<Message[]>([
     {
       id: '0',
       role: 'assistant',
-      content: 'Hello! I\'m your AI Scrum Master. I can help you plan sprints, refine user stories, estimate effort, and answer Agile questions. How can I help today?',
+      content: "Hello! I'm your AI Enterprise SDLC Agent. Select a persona in the chat tab to get started — Scrum Master, Tech Lead, QA Lead, Release Manager, or DevOps. How can I help today?",
       timestamp: new Date(),
     },
   ]);
@@ -25,7 +25,8 @@ export function useChat() {
     setLoading(true);
     setError(null);
     try {
-      const reply = await chatApi.send(content, messages);
+      const result = await chatApi.send(content, messages, persona);
+      const reply = result.reply;
       const assistantMsg: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
@@ -33,12 +34,12 @@ export function useChat() {
         timestamp: new Date(),
       };
       setMessages(prev => [...prev, assistantMsg]);
-    } catch (e) {
+    } catch {
       setError('Failed to get response. Is the backend running?');
     } finally {
       setLoading(false);
     }
-  }, [messages]);
+  }, [messages, persona]);
 
   return { messages, loading, error, sendMessage };
 }

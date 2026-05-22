@@ -4,10 +4,15 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+venv311/
 dist/
 *.egg
 .env
 *.log
+*.db
+
+# Claude Code
+.claude/
 
 # Node
 node_modules/
