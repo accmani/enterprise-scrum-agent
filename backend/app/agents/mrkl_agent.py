@@ -72,10 +72,20 @@ RULES:
 
 SDLC AUTO-FIX FLOW — when asked to fix a bug:
 Step 1: Call github_integration ONCE with operation=auto_fix
+  - Always include "base": "develop" — fix branches are ALWAYS cut from develop
+  - Always include "release_branch": "release/june-2026" — PRs always target the release branch, NEVER main
+  - Branch naming: fix/{jira-key}-{short-description}  e.g. fix/st-42-er-copay-wrong-rate
 Step 2: When you receive ANY response from github_integration — go to Final Answer IMMEDIATELY
 Step 3: NEVER call github_integration more than once
 Step 4: NEVER retry after receiving auto_fix_complete=true OR duplicate=true
 Step 5: A response containing pr_url, pr_number, or duplicate=true means SUCCESS — stop immediately
+
+GITFLOW BRANCH STRATEGY (follow this for ALL branch and PR operations):
+- develop        → integration base; all fix branches cut from here
+- fix/ST-{n}-*   → one branch per Jira ticket, branched from develop
+- release/mmm-yyyy → release candidate; all fix PRs target here for system testing
+- main           → production; only release branch merges in after sign-off
+- hotfix/ST-{n}-* → cut from main for critical prod fixes, merge back to main AND develop
 
 Begin!
 

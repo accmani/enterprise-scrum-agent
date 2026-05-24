@@ -49,7 +49,8 @@ class GitHubTool(BaseTool):
                 pr_title = parsed.get("title", "")
                 pr_body = parsed.get("body", "")
                 jira_key = parsed.get("jira_key", "")
-                base_branch = parsed.get("base", "main")
+                base_branch = parsed.get("base", settings.base_branch)
+                release_branch = parsed.get("release_branch", settings.release_branch)
             except (json.JSONDecodeError, TypeError):
                 parsed = {}
                 operation = ""
@@ -59,7 +60,8 @@ class GitHubTool(BaseTool):
                 pr_title = ""
                 pr_body = ""
                 jira_key = ""
-                base_branch = "main"
+                base_branch = settings.base_branch
+                release_branch = settings.release_branch
 
             q = query.lower()
 
@@ -214,18 +216,15 @@ class GitHubTool(BaseTool):
                 if not fixed_code or not file_to_fix:
                     return json.dumps({"error": "Need fixed_code and file to perform auto-fix"})
 
-                # Step 1: Get base branch SHA
-                # Try main then master
-                ref_resp = httpx.get(f"{base_url}/git/ref/heads/main", headers=headers, timeout=15)
+                # Step 1: Get SHA from base_branch (develop) — fix branches always cut from develop
+                ref_resp = httpx.get(f"{base_url}/git/ref/heads/{base_branch}", headers=headers, timeout=15)
+                if ref_resp.status_code != 200:
+                    # Fall back to main if develop not found
+                    ref_resp = httpx.get(f"{base_url}/git/ref/heads/main", headers=headers, timeout=15)
                 if ref_resp.status_code != 200:
                     ref_resp = httpx.get(f"{base_url}/git/ref/heads/master", headers=headers, timeout=15)
                 if ref_resp.status_code != 200:
-                    # Get default branch from repo info
-                    repo_resp = httpx.get(base_url, headers=headers, timeout=15)
-                    default_branch = repo_resp.json().get("default_branch", "main") if repo_resp.status_code == 200 else "main"
-                    ref_resp = httpx.get(f"{base_url}/git/ref/heads/{default_branch}", headers=headers, timeout=15)
-                if ref_resp.status_code != 200:
-                    return json.dumps({"error": f"Could not get branch SHA: {ref_resp.json()}"})
+                    return json.dumps({"error": f"Could not get SHA for branch '{base_branch}': {ref_resp.json()}"})
                 ref_data = ref_resp.json()
                 sha = ref_data.get("object", {}).get("sha") if isinstance(ref_data, dict) else None
                 if not sha:
@@ -282,15 +281,27 @@ class GitHubTool(BaseTool):
                             "message": "PR already exists — skipping creation"
                         })
 
-                # Step 4: Create PR
+                # Step 4: Create PR — targets release_branch (e.g. release/june-2026), not main
                 pr_resp = httpx.post(
                     f"{base_url}/pulls",
                     headers=headers,
                     json={
                         "title": f"fix({jira_key}): {bug[:100]}",
-                        "body": f"## Auto-fix by Enterprise Scrum Agent\n\n**Jira:** {jira_key}\n**Bug:** {bug}\n\n### Changes\nFixed code in `{file_to_fix}`",
+                        "body": (
+                            f"## Auto-fix by Enterprise Scrum Agent\n\n"
+                            f"**Jira:** {jira_key}\n"
+                            f"**Bug:** {bug}\n"
+                            f"**Branch flow:** `{base_branch}` → `{branch}` → `{release_branch}`\n\n"
+                            f"### Changes\n"
+                            f"Fixed code in `{file_to_fix}`\n\n"
+                            f"### Merge checklist\n"
+                            f"- [ ] Code review approved\n"
+                            f"- [ ] Unit tests pass\n"
+                            f"- [ ] System test on `{release_branch}` build passes\n"
+                            f"- [ ] Merge to `main` after release sign-off"
+                        ),
                         "head": branch,
-                        "base": "main",
+                        "base": release_branch,
                     },
                     timeout=15
                 )
@@ -298,6 +309,8 @@ class GitHubTool(BaseTool):
                 return json.dumps({
                     "auto_fix_complete": True,
                     "branch": branch,
+                    "base_branch": base_branch,
+                    "target_branch": release_branch,
                     "pr_number": pr_data.get("number"),
                     "pr_url": pr_data.get("html_url"),
                     "jira_key": jira_key

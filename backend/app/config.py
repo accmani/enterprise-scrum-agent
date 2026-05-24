@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     # GitHub
     github_token: str = ""
     github_repo: str = ""
+    base_branch: str = "develop"
+    release_branch: str = "release/june-2026"
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 
