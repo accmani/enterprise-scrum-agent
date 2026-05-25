@@ -13,6 +13,8 @@ Each Super Agent is a ScrumMRKLAgent instance configured with:
 - A filtered tool subset matching the persona's responsibilities
 """
 
+import asyncio
+
 from langchain.agents import AgentExecutor, create_react_agent
 from langchain_openai import ChatOpenAI, AzureChatOpenAI
 from langchain.prompts import PromptTemplate
@@ -54,6 +56,7 @@ Thought: I now know the final answer
 Final Answer: the final answer to the original input question
 
 RULES:
+- CRITICAL: NEVER call code_scanner unless the user explicitly says "scan the codebase" or "search for bugs". If a bug is already described, answer directly as Final Answer.
 - CRITICAL: Call each tool ONLY ONCE per step. Never call the same tool twice. If tool returns a result accept it and go to Final Answer immediately.
 - CRITICAL: Never create duplicate Jira issues or GitHub PRs. If creation succeeded do not call the tool again.
 - Always include "Action Input:" immediately after "Action:"
@@ -70,6 +73,7 @@ RULES:
 - For database/claims queries: use db_agent
 - For performance metrics: use metrics_tool
 - For general Agile advice: go straight to Final Answer without tools
+- For defect analysis / domain explanation (question does NOT start with "Use the"): go straight to Final Answer — answer from your HCSC expert knowledge, no tools needed
 - For system test / Jenkins builds: use jenkins_agent
 - For release branch list or sync to develop: use github_integration
 
@@ -77,7 +81,7 @@ SDLC AUTO-FIX FLOW — when asked to fix a bug:
 Step 1: Call github_integration ONCE with operation=auto_fix
   - Always include "base": "develop" — fix branches are ALWAYS cut from develop
   - Always include "release_branch": "release/june-2026" — PRs always target the release branch, NEVER main
-  - Branch naming: fix/{jira-key}-{short-description}  e.g. fix/st-42-er-copay-wrong-rate
+  - Branch naming: fix/{{jira-key}}-{{short-description}}  e.g. fix/st-42-er-copay-wrong-rate
 Step 2: When you receive ANY response from github_integration — go to Final Answer IMMEDIATELY
 Step 3: NEVER call github_integration more than once
 Step 4: NEVER retry after receiving auto_fix_complete=true OR duplicate=true
@@ -85,10 +89,10 @@ Step 5: A response containing pr_url, pr_number, or duplicate=true means SUCCESS
 
 GITFLOW BRANCH STRATEGY (follow this for ALL branch and PR operations):
 - develop          → integration base; all fix branches cut from here
-- fix/ST-{n}-*     → one branch per Jira ticket, branched from develop
+- fix/ST-{{n}}-*     → one branch per Jira ticket, branched from develop
 - release/mmm-yyyy → release candidate; fix PRs target here; system test runs on this branch
 - main             → production; only release branch merges in after sign-off
-- hotfix/ST-{n}-*  → cut from main for critical prod fixes, merge back to main AND develop
+- hotfix/ST-{{n}}-*  → cut from main for critical prod fixes, merge back to main AND develop
 
 FULL SDLC CYCLE (steps in order):
 1. Detect defect (scanner)
@@ -246,7 +250,12 @@ class ScrumMRKLAgent:
         query = query.replace('{', '{{').replace('}', '}}')
         try:
             executor = self._get_executor()
-            result = await executor.ainvoke({"input": query})
+            result = await asyncio.wait_for(
+                executor.ainvoke({"input": query}),
+                timeout=90,
+            )
             return result.get("output", "I was unable to process that request.")
+        except asyncio.TimeoutError:
+            return "Request timed out after 90 seconds. The agent took too long — please try again."
         except Exception as e:
             return f"I encountered an error processing your request: {str(e)}"

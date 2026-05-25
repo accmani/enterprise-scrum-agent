@@ -182,7 +182,7 @@ const PIPELINE_STEPS = [
 ];
 
 const buildPrompts = (bug: typeof BUGS[0], jiraKey: string, releaseBranch = 'release/june-2026') => [
-  `You are an HCSC claims system expert. Analyze this defect with domain context:\nBug: ${bug.id} — ${bug.title}\nDomain: ${bug.domain}\nFile: ${bug.file}\nDescription: ${bug.description}\nBusiness Impact: ${bug.businessImpact}\nAffected Tables: ${bug.allowedTables.join(', ')}\nCompliance: ${bug.compliance.join(', ')}\n\nProvide: (1) root cause in DB2/ODS context, (2) which table fields are affected and why, (3) CMS/HIPAA compliance implications, (4) confidence score 0-100% in your diagnosis.`,
+  `You are an HCSC claims system expert. Analyze this defect with domain context:\nBug: ${bug.id} — ${bug.title}\nDomain: ${bug.domain}\nFile: ${bug.file}\nDescription: ${bug.description}\nBusiness Impact: ${bug.businessImpact}\nAffected Tables: ${bug.allowedTables.join(', ')}\nCompliance: ${bug.compliance.join(', ')}\n\nProvide: (1) root cause in DB2/ODS context, (2) which table fields are affected and why, (3) CMS/HIPAA compliance implications, (4) confidence score 0-100% in your diagnosis.\n\nAnswer directly from your HCSC expert knowledge — go straight to Final Answer, no tools needed.`,
   `Use the jira_integration tool ONCE to create a Jira issue:\n- operation: create_issue\n- title: Fix: ${bug.title}\n- domain: ${bug.contextDomain}\n- priority: ${bug.severity}\n- description: ${bug.description} | Impact: ${bug.businessImpact} | Tables: ${bug.allowedTables.join(', ')} | Compliance: ${bug.compliance.join('+')}\nCall ONCE only.`,
   `Use the sprint_manager tool: 1) List active sprint, 2) Estimate story points for: "${bug.title}" — ${bug.severity} ${bug.type} defect in ${bug.domain}, 3) Recommend sprint assignment. Consider: compliance=${bug.compliance.join('+')}, tables=${bug.allowedTables.join(', ')}.`,
   `Use the design_agent tool for: ${bug.title}\nFile: ${bug.file}\nTables: ${bug.allowedTables.join(', ')}\nDescription: ${bug.description}\nCompliance: ${bug.compliance.join(', ')}\n\nInclude: (1) root cause in DB2/ODS context, (2) before/after code, (3) affected table fields and why, (4) risk assessment with CMS/HIPAA implications, (5) boundary condition test strategy.`,
@@ -203,7 +203,7 @@ interface StepResult {
   compliance_checks?: string[];
 }
 
-export function Demo({ scrollToTop, onTabChange }: { scrollToTop?: () => void; onTabChange?: (tab: string) => void }) {
+export function Demo(_props: { scrollToTop?: () => void; onTabChange?: (tab: string) => void }) {
   const [selectedBug, setSelectedBug] = useState<typeof BUGS[0] | null>(null);
   const [running, setRunning]           = useState(false);
   const [currentStep, setCurrentStep]   = useState(0);
@@ -310,7 +310,7 @@ export function Demo({ scrollToTop, onTabChange }: { scrollToTop?: () => void; o
       const t0 = Date.now();
       try {
         const prompts = buildPrompts(bug, actualJiraKey, actualReleaseBranch);
-        const result  = await chatApi.send(prompts[i], [], PIPELINE_STEPS[i].persona, bug.id, bug.contextDomain, bug.type.toLowerCase().replace(' ','_'));
+        const result  = await chatApi.send(prompts[i], [], PIPELINE_STEPS[i].persona, bug.id, bug.contextDomain, bug.type.toLowerCase().replace(' ','_'), i === 0);
         const reply   = typeof result === 'string' ? result : (result as any).reply || '';
         const duration = Math.round((Date.now() - t0) / 1000);
         if (i === 1) { const m = reply.match(/\b(ST-\d+)\b/); if (m) actualJiraKey = m[1]; }

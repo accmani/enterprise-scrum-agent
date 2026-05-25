@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 import json
+import time
 
 from app.database import get_db
 from app.agents.orchestrator import SDLCOrchestrator
@@ -26,6 +27,8 @@ class ChatRequest(BaseModel):
     bug_id: Optional[str] = None
     domain: Optional[str] = None
     bug_type: Optional[str] = None
+    # Skip ReAct agent — use direct LLM call (for analysis steps that need no tools)
+    direct_llm: Optional[bool] = False
     # Evaluation fields — passed when step 6 completes
     evaluate_fix: Optional[bool] = False
     fixed_code: Optional[str] = None
@@ -103,6 +106,28 @@ async def chat(request: ChatRequest, db: AsyncSession = Depends(get_db)):
     context_block = "\n\n".join(filter(None, [domain_context, policy_context]))
     if context_block and policy.domain != 'general':
         enhanced_message = f"{request.message}\n\n{'─'*60}\n{context_block}"
+
+    # ── Direct LLM path (bypasses ReAct agent — no tools, single call) ────────
+    if request.direct_llm:
+        from langchain_core.messages import HumanMessage, SystemMessage
+        from app.agents.mrkl_agent import ScrumMRKLAgent
+        t0 = time.time()
+        _persona_cfg = PERSONAS.get(persona, {})
+        _agent = ScrumMRKLAgent(db_session=db, persona=persona, persona_config=_persona_cfg)
+        _llm = _agent._build_llm()
+        _system = _persona_cfg.get("system_prompt", "You are an expert SDLC assistant.")
+        _resp = await _llm.ainvoke([
+            SystemMessage(content=_system),
+            HumanMessage(content=enhanced_message),
+        ])
+        return ChatResponse(
+            reply=_resp.content,
+            persona=persona,
+            duration_ms=int((time.time() - t0) * 1000),
+            policy_domain=policy.domain,
+            policy_tools=policy.tools,
+            compliance_checks=policy.compliance_checks,
+        )
 
     # ── Run orchestrator ────────────────────────────────────────────────────
     orchestrator = SDLCOrchestrator(db_session=db)

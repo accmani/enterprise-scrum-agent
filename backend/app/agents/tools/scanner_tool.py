@@ -140,13 +140,11 @@ CONFIDENCE SCORING GUIDE:
 class ScannerTool(BaseTool):
     name: str = "code_scanner"
     description: str = (
-        "Autonomously scans HCSC healthcare-claims Java codebase for ANY defect. "
-        "Uses LLM reasoning — not just patterns — to detect: boundary conditions, "
-        "inverted logic, null pointer risks, missing cases, business rule violations. "
-        "Scans ANY file in the repo, not just known files. "
-        "PHI-safe: patient data is masked before LLM analysis. "
-        "Returns findings with confidence scores, domain classification, "
-        "affected DB2/ODS tables, and fix suggestions."
+        "ONLY use this tool when the user explicitly asks to SCAN or SEARCH the codebase for unknown bugs. "
+        "DO NOT use this tool when a specific bug or defect is already described — answer from domain knowledge instead. "
+        "Autonomously scans HCSC healthcare-claims Java codebase for undiscovered defects. "
+        "PHI-safe: patient data masked before LLM analysis. "
+        "Returns findings with confidence scores, domain classification, affected tables."
     )
     args_schema: type[BaseModel] = ScannerInput
 

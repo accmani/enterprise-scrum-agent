@@ -6,6 +6,7 @@ const API_BASE = (import.meta.env.VITE_API_URL as string) || '';
 const client = axios.create({
   baseURL: `${API_BASE}/api`,
   headers: { 'Content-Type': 'application/json' },
+  timeout: 120000,
 });
 
 export const chatApi = {
@@ -16,6 +17,7 @@ export const chatApi = {
     bugId?: string,
     domain?: string,
     bugType?: string,
+    directLlm?: boolean,
   ): Promise<{
     reply: string;
     persona?: string;
@@ -44,9 +46,10 @@ export const chatApi = {
       message,
       history: history.map(m => ({ role: m.role, content: m.content })),
       persona,
-      ...(bugId    && { bug_id: bugId }),
-      ...(domain   && { domain }),
-      ...(bugType  && { bug_type: bugType }),
+      ...(bugId     && { bug_id: bugId }),
+      ...(domain    && { domain }),
+      ...(bugType   && { bug_type: bugType }),
+      ...(directLlm && { direct_llm: true }),
     });
     return data;
   },
