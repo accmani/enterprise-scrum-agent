@@ -170,3 +170,20 @@ export const metricsApi = {
     catch { return { recent: [] }; }
   },
 };
+
+export const githubApi = {
+  listReleaseBranches: async (): Promise<string[]> => {
+    try {
+      const { data } = await client.get('/github/release-branches');
+      return data.branches || [];
+    } catch { return []; }
+  },
+  createReleaseBranch: async (name: string): Promise<{ created: boolean; branch: string; error?: string }> => {
+    try {
+      const { data } = await client.post('/github/release-branch', { name });
+      return data;
+    } catch (e: any) {
+      return { created: false, branch: name, error: e.message };
+    }
+  },
+};

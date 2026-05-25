@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { chatApi } from '../../services/api';
+import { chatApi, githubApi } from '../../services/api';
 
 // ── Bug definitions ────────────────────────────────────────────────────────
 const BUGS = [
@@ -164,13 +164,11 @@ switch (serviceType) {
   },
 ];
 
-// ── No hardcoded scores — LLM evaluates in real time (Option B) ───────────
-
 const scoreColor = (s: number) => s >= 0.85 ? '#16A34A' : s >= 0.70 ? '#D97706' : '#DC2626';
 const scoreBg   = (s: number) => s >= 0.85 ? '#DCFCE7' : s >= 0.70 ? '#FEF3C7' : '#FEE2E2';
 const scoreLabel= (s: number) => s >= 0.85 ? 'High confidence' : s >= 0.70 ? 'Needs review' : 'Low confidence';
 
-// ── Pipeline ──────────────────────────────────────────────────────────────
+// ── Pipeline (9 steps) ────────────────────────────────────────────────────
 const PIPELINE_STEPS = [
   { id: 1, label: 'Detect defect',     icon: '🔍', persona: 'tech_lead' },
   { id: 2, label: 'Create Jira ticket',icon: '📋', persona: 'tech_lead' },
@@ -179,16 +177,20 @@ const PIPELINE_STEPS = [
   { id: 5, label: 'Generate tests',     icon: '🧪', persona: 'qa_lead' },
   { id: 6, label: 'Code fix & PR',      icon: '⚙️', persona: 'tech_lead' },
   { id: 7, label: 'Code review',        icon: '👁',  persona: 'tech_lead' },
+  { id: 8, label: 'System test',        icon: '🚦', persona: 'tech_lead' },
+  { id: 9, label: 'Sync to develop',    icon: '🔄', persona: 'tech_lead' },
 ];
 
-const buildPrompts = (bug: typeof BUGS[0], jiraKey: string) => [
+const buildPrompts = (bug: typeof BUGS[0], jiraKey: string, releaseBranch = 'release/june-2026') => [
   `You are an HCSC claims system expert. Analyze this defect with domain context:\nBug: ${bug.id} — ${bug.title}\nDomain: ${bug.domain}\nFile: ${bug.file}\nDescription: ${bug.description}\nBusiness Impact: ${bug.businessImpact}\nAffected Tables: ${bug.allowedTables.join(', ')}\nCompliance: ${bug.compliance.join(', ')}\n\nProvide: (1) root cause in DB2/ODS context, (2) which table fields are affected and why, (3) CMS/HIPAA compliance implications, (4) confidence score 0-100% in your diagnosis.`,
   `Use the jira_integration tool ONCE to create a Jira issue:\n- operation: create_issue\n- title: Fix: ${bug.title}\n- domain: ${bug.contextDomain}\n- priority: ${bug.severity}\n- description: ${bug.description} | Impact: ${bug.businessImpact} | Tables: ${bug.allowedTables.join(', ')} | Compliance: ${bug.compliance.join('+')}\nCall ONCE only.`,
   `Use the sprint_manager tool: 1) List active sprint, 2) Estimate story points for: "${bug.title}" — ${bug.severity} ${bug.type} defect in ${bug.domain}, 3) Recommend sprint assignment. Consider: compliance=${bug.compliance.join('+')}, tables=${bug.allowedTables.join(', ')}.`,
   `Use the design_agent tool for: ${bug.title}\nFile: ${bug.file}\nTables: ${bug.allowedTables.join(', ')}\nDescription: ${bug.description}\nCompliance: ${bug.compliance.join(', ')}\n\nInclude: (1) root cause in DB2/ODS context, (2) before/after code, (3) affected table fields and why, (4) risk assessment with CMS/HIPAA implications, (5) boundary condition test strategy.`,
   `Use the qa_agent tool for: ${bug.title}\nDomain: ${bug.domain}\nTables: ${bug.allowedTables.join(', ')}\n\nGenerate: (1) bug reproduction test, (2) fix verification test, (3) boundary condition tests — especially the == 0 or exact boundary, (4) HIPAA test — no PHI in error messages, (5) BDD scenarios.`,
-  `Use the github_integration tool with operation=auto_fix. Call ONCE with EXACTLY this JSON — do not modify fixed_code:\n{"operation": "auto_fix", "bug": "${bug.title}", "file": "${bug.file}", "fixed_code": ${JSON.stringify(bug.fixedCode)}, "jira_key": "${jiraKey}", "base": "develop", "release_branch": "release/june-2026"}`,
+  `Use the github_integration tool with operation=auto_fix. Call ONCE with EXACTLY this JSON — do not modify fixed_code:\n{"operation": "auto_fix", "bug": "${bug.title}", "file": "${bug.file}", "fixed_code": ${JSON.stringify(bug.fixedCode)}, "jira_key": "${jiraKey}", "base": "develop", "release_branch": "${releaseBranch}"}`,
   `Use the code_review_agent to review the latest open PR for ${jiraKey}.\nFix: ${bug.title} | Domain: ${bug.domain} | Tables: ${bug.allowedTables.join(', ')} | Compliance: ${bug.compliance.join(', ')}\n\nReview: (1) boundary cases including == 0, (2) HIPAA — no PHI in logs, (3) ${bug.compliance.includes('CMS Billing') ? 'CMS billing rule accuracy' : 'exception handling'}, (4) test coverage, (5) domain logic accuracy. Give production-readiness confidence score 0-100%.`,
+  `Use the jenkins_agent tool to trigger a system test build. Pass as JSON: {"operation": "trigger_build", "branch": "${releaseBranch}", "job": "healthcare-claims"}. Return build status, test summary, and whether all tests pass.`,
+  `Use the github_integration tool with operation=sync_to_develop and source="${releaseBranch}". This will open a PR from ${releaseBranch} to develop so the fix is available for the next production release cycle. Call ONCE and return the PR URL.`,
 ];
 
 interface StepResult {
@@ -208,11 +210,27 @@ export function Demo({ scrollToTop, onTabChange }: { scrollToTop?: () => void; o
   const [stepResults, setStepResults]   = useState<Record<number, StepResult>>({});
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
   const [showCode, setShowCode]         = useState<'bug' | 'fix' | null>(null);
+
+  // Gate B — PR approval (after step 6)
   const [gateStatus, setGateStatus]     = useState<'waiting'|'approved'|'rejected'|'changes_requested'|null>(null);
   const [gateComment, setGateComment]   = useState('');
   const [showCommentBox, setShowCommentBox] = useState(false);
   const [prUrl, setPrUrl]               = useState('');
   const [prNumber, setPrNumber]         = useState<number | null>(null);
+  const gateResolveRef = useRef<((v:string)=>void)|null>(null);
+
+  // Gate A — Release branch selection (after step 5)
+  const [releaseBranchGate, setReleaseBranchGate] = useState<'idle'|'waiting'|'resolved'>('idle');
+  const [availableReleaseBranches, setAvailableReleaseBranches] = useState<string[]>([]);
+  const [selectedReleaseBranch, setSelectedReleaseBranch] = useState('release/june-2026');
+  const [newReleaseName, setNewReleaseName] = useState('');
+  const [creatingReleaseBranch, setCreatingReleaseBranch] = useState(false);
+  const releaseBranchResolveRef = useRef<((v:string)=>void)|null>(null);
+
+  // Gate C — Sync to develop (after step 8)
+  const [syncGateStatus, setSyncGateStatus] = useState<'idle'|'waiting'|'syncing'|'done'|'skipped'>('idle');
+  const syncGateResolveRef = useRef<((v:string)=>void)|null>(null);
+
   const [showRelease, setShowRelease]   = useState(false);
   const [releaseResult, setReleaseResult] = useState('');
   const [releaseRunning, setReleaseRunning] = useState(false);
@@ -228,15 +246,41 @@ export function Demo({ scrollToTop, onTabChange }: { scrollToTop?: () => void; o
     reviewer_notes?: string;
     confidence_label?: string;
   } | null>(null);
-  const gateResolveRef = useRef<((v:string)=>void)|null>(null);
 
+  // ── Gate helpers ──────────────────────────────────────────────────────────
   const waitForApproval = (): Promise<string> =>
     new Promise(r => { gateResolveRef.current = r; });
 
-  const handleApprove        = () => { setGateStatus('approved');           gateResolveRef.current?.('approved'); };
-  const handleReject         = () => { setGateStatus('rejected');           gateResolveRef.current?.('rejected'); };
-  const handleRequestChanges = () => { setGateStatus('changes_requested');  gateResolveRef.current?.('changes_requested'); };
+  const waitForReleaseBranch = (): Promise<string> =>
+    new Promise(r => { releaseBranchResolveRef.current = r; });
 
+  const waitForSyncDecision = (): Promise<string> =>
+    new Promise(r => { syncGateResolveRef.current = r; });
+
+  const handleApprove        = () => { setGateStatus('approved');          gateResolveRef.current?.('approved'); };
+  const handleReject         = () => { setGateStatus('rejected');          gateResolveRef.current?.('rejected'); };
+  const handleRequestChanges = () => { setGateStatus('changes_requested'); gateResolveRef.current?.('changes_requested'); };
+
+  const handleSelectReleaseBranch = (branch: string) => {
+    setSelectedReleaseBranch(branch);
+    setReleaseBranchGate('resolved');
+    releaseBranchResolveRef.current?.(branch);
+  };
+
+  const handleCreateAndSelectReleaseBranch = async () => {
+    if (!newReleaseName) return;
+    setCreatingReleaseBranch(true);
+    const result = await githubApi.createReleaseBranch(newReleaseName);
+    setCreatingReleaseBranch(false);
+    const branch = result.branch;
+    setAvailableReleaseBranches(prev => [...prev, branch]);
+    handleSelectReleaseBranch(branch);
+  };
+
+  const handleSyncYes  = () => { setSyncGateStatus('syncing'); syncGateResolveRef.current?.('sync'); };
+  const handleSyncSkip = () => { setSyncGateStatus('skipped'); syncGateResolveRef.current?.('skip'); };
+
+  // ── Scan ──────────────────────────────────────────────────────────────────
   const runScan = async () => {
     setScanRunning(true); setScanResult(null);
     try {
@@ -246,62 +290,35 @@ export function Demo({ scrollToTop, onTabChange }: { scrollToTop?: () => void; o
     setScanRunning(false);
   };
 
+  // ── Main demo runner ───────────────────────────────────────────────────────
   const runDemo = async (bug: typeof BUGS[0]) => {
     setSelectedBug(bug); setRunning(true); setCurrentStep(0);
     setStepResults({}); setExpandedStep(null); setShowCode(null);
     setGateStatus(null); setGateComment(''); setPrUrl(''); setPrNumber(null);
     setShowRelease(false); setReleaseResult(''); setShowCommentBox(false); setOverallEval(null);
+    setReleaseBranchGate('idle'); setSelectedReleaseBranch('release/june-2026');
+    setNewReleaseName(''); setAvailableReleaseBranches([]); setCreatingReleaseBranch(false);
+    setSyncGateStatus('idle');
 
-    let actualJiraKey = bug.jiraKey;
+    let actualJiraKey    = bug.jiraKey;
+    let actualReleaseBranch = 'release/june-2026';
 
-    for (let i = 0; i < 6; i++) {
-      const prompts = buildPrompts(bug, actualJiraKey);
+    // ── Steps 1–5 ────────────────────────────────────────────────────────────
+    for (let i = 0; i < 5; i++) {
       setCurrentStep(i + 1);
       setStepResults(prev => ({ ...prev, [i+1]: { status: 'running', response: '', duration: 0 } }));
       const t0 = Date.now();
       try {
-        const result = await chatApi.send(prompts[i], [], PIPELINE_STEPS[i].persona, bug.id, bug.contextDomain, bug.type.toLowerCase().replace(' ','_'));
-        const reply    = typeof result === 'string' ? result : (result as any).reply || '';
+        const prompts = buildPrompts(bug, actualJiraKey, actualReleaseBranch);
+        const result  = await chatApi.send(prompts[i], [], PIPELINE_STEPS[i].persona, bug.id, bug.contextDomain, bug.type.toLowerCase().replace(' ','_'));
+        const reply   = typeof result === 'string' ? result : (result as any).reply || '';
         const duration = Math.round((Date.now() - t0) / 1000);
-
         if (i === 1) { const m = reply.match(/\b(ST-\d+)\b/); if (m) actualJiraKey = m[1]; }
-
-        let prUrlLocal = ''; let prNumLocal: number | null = null;
-        if (i === 5) {
-          const um = reply.match(/https:\/\/github\.com\/[^\s"')]+\/pull\/\d+/);
-          const nm = reply.match(/pr_number[":\s]+(\d+)/i) || reply.match(/pull\/(\d+)/);
-          if (um) { prUrlLocal = um[0]; setPrUrl(um[0]); }
-          if (nm) { prNumLocal = parseInt(nm[1]); setPrNumber(parseInt(nm[1])); }
-          // Show "evaluating..." state immediately
-          setOverallEval({ score: 0, refined: false, evalRunning: true });
-
-          // Call LLM self-evaluation (Option B) — async, don't block pipeline
-          chatApi.evaluate(
-            bug.fixedCode,
-            bug.id,
-            bug.contextDomain,
-            bug.type.toLowerCase().replace(' ', '_'),
-            bug.description,
-          ).then(ev => {
-            setOverallEval({
-              score: ev.overall,
-              refined: ev.needs_refinement,
-              evalRunning: false,
-              scores: ev.scores,
-              gaps: ev.gaps,
-              suggestions: ev.refinement_suggestions,
-              reviewer_notes: ev.reviewer_notes,
-              confidence_label: ev.confidence_label,
-            });
-          }).catch(() => {
-            setOverallEval({ score: 0.75, refined: false, evalRunning: false });
-          });
-        }
-
         setStepResults(prev => ({
           ...prev,
-          [i+1]: { status: 'done', response: reply, duration, prUrl: prUrlLocal, prNumber: prNumLocal ?? undefined,
-                   policy_domain: (result as any).policy_domain, compliance_checks: (result as any).compliance_checks || [] },
+          [i+1]: { status: 'done', response: reply, duration,
+                   policy_domain: (result as any).policy_domain,
+                   compliance_checks: (result as any).compliance_checks || [] },
         }));
         setExpandedStep(i + 1);
       } catch (e: any) {
@@ -310,21 +327,105 @@ export function Demo({ scrollToTop, onTabChange }: { scrollToTop?: () => void; o
       await new Promise(r => setTimeout(r, 600));
     }
 
+    // ── Gate A: Release branch selection ─────────────────────────────────────
+    setRunning(false); setCurrentStep(0);
+    const branches = await githubApi.listReleaseBranches();
+    setAvailableReleaseBranches(branches.length > 0 ? branches : ['release/june-2026']);
+    setReleaseBranchGate('waiting');
+    actualReleaseBranch = await waitForReleaseBranch();
+
+    // ── Step 6: Code fix & PR ─────────────────────────────────────────────────
+    setRunning(true); setCurrentStep(6);
+    setStepResults(prev => ({ ...prev, 6: { status: 'running', response: '', duration: 0 } }));
+    {
+      const t0 = Date.now();
+      try {
+        const prompts = buildPrompts(bug, actualJiraKey, actualReleaseBranch);
+        const result  = await chatApi.send(prompts[5], [], 'tech_lead', bug.id, bug.contextDomain, bug.type.toLowerCase().replace(' ','_'));
+        const reply   = typeof result === 'string' ? result : (result as any).reply || '';
+        const duration = Math.round((Date.now() - t0) / 1000);
+        const um = reply.match(/https:\/\/github\.com\/[^\s"')]+\/pull\/\d+/);
+        const nm = reply.match(/pr_number[":\s]+(\d+)/i) || reply.match(/pull\/(\d+)/);
+        if (um) { setPrUrl(um[0]); }
+        if (nm) { setPrNumber(parseInt(nm[1])); }
+        setOverallEval({ score: 0, refined: false, evalRunning: true });
+        chatApi.evaluate(bug.fixedCode, bug.id, bug.contextDomain, bug.type.toLowerCase().replace(' ', '_'), bug.description)
+          .then(ev => {
+            setOverallEval({ score: ev.overall, refined: ev.needs_refinement, evalRunning: false, scores: ev.scores, gaps: ev.gaps, suggestions: ev.refinement_suggestions, reviewer_notes: ev.reviewer_notes, confidence_label: ev.confidence_label });
+          }).catch(() => {
+            setOverallEval({ score: 0.75, refined: false, evalRunning: false });
+          });
+        setStepResults(prev => ({
+          ...prev,
+          6: { status: 'done', response: reply, duration, prUrl: um?.[0], prNumber: nm ? parseInt(nm[1]) : undefined,
+               policy_domain: (result as any).policy_domain, compliance_checks: (result as any).compliance_checks || [] },
+        }));
+        setExpandedStep(6);
+      } catch (e: any) {
+        setStepResults(prev => ({ ...prev, 6: { status: 'error', response: `Error: ${e.message}`, duration: Math.round((Date.now()-t0)/1000) } }));
+      }
+    }
+
+    // ── Gate B: PR approval ───────────────────────────────────────────────────
     setRunning(false); setCurrentStep(0); setGateStatus('waiting'); setExpandedStep(null);
     const decision = await waitForApproval();
     if (decision !== 'approved') return;
 
+    // ── Step 7: Code review ───────────────────────────────────────────────────
     setRunning(true); setCurrentStep(7);
     setStepResults(prev => ({ ...prev, 7: { status: 'running', response: '', duration: 0 } }));
-    const t0 = Date.now();
-    try {
-      const result  = await chatApi.send(buildPrompts(bug, actualJiraKey)[6], [], 'tech_lead', bug.id, bug.contextDomain);
-      const reply   = typeof result === 'string' ? result : (result as any).reply || '';
-      setStepResults(prev => ({ ...prev, 7: { status: 'done', response: reply, duration: Math.round((Date.now()-t0)/1000) } }));
-      setExpandedStep(7);
-    } catch (e: any) {
-      setStepResults(prev => ({ ...prev, 7: { status: 'error', response: `Error: ${e.message}`, duration: Math.round((Date.now()-t0)/1000) } }));
+    {
+      const t0 = Date.now();
+      try {
+        const prompts = buildPrompts(bug, actualJiraKey, actualReleaseBranch);
+        const result  = await chatApi.send(prompts[6], [], 'tech_lead', bug.id, bug.contextDomain);
+        const reply   = typeof result === 'string' ? result : (result as any).reply || '';
+        setStepResults(prev => ({ ...prev, 7: { status: 'done', response: reply, duration: Math.round((Date.now()-t0)/1000) } }));
+        setExpandedStep(7);
+      } catch (e: any) {
+        setStepResults(prev => ({ ...prev, 7: { status: 'error', response: `Error: ${e.message}`, duration: Math.round((Date.now()-t0)/1000) } }));
+      }
     }
+
+    // ── Step 8: System test (Jenkins) ─────────────────────────────────────────
+    await new Promise(r => setTimeout(r, 600));
+    setCurrentStep(8);
+    setStepResults(prev => ({ ...prev, 8: { status: 'running', response: '', duration: 0 } }));
+    {
+      const t0 = Date.now();
+      try {
+        const prompts = buildPrompts(bug, actualJiraKey, actualReleaseBranch);
+        const result  = await chatApi.send(prompts[7], [], 'tech_lead', bug.id, bug.contextDomain);
+        const reply   = typeof result === 'string' ? result : (result as any).reply || '';
+        setStepResults(prev => ({ ...prev, 8: { status: 'done', response: reply, duration: Math.round((Date.now()-t0)/1000) } }));
+        setExpandedStep(8);
+      } catch (e: any) {
+        setStepResults(prev => ({ ...prev, 8: { status: 'error', response: `Error: ${e.message}`, duration: Math.round((Date.now()-t0)/1000) } }));
+      }
+    }
+
+    // ── Gate C: Sync to develop? ──────────────────────────────────────────────
+    setRunning(false); setCurrentStep(0);
+    setSyncGateStatus('waiting');
+    const syncDecision = await waitForSyncDecision();
+
+    if (syncDecision === 'sync') {
+      setRunning(true); setCurrentStep(9);
+      setStepResults(prev => ({ ...prev, 9: { status: 'running', response: '', duration: 0 } }));
+      const t0 = Date.now();
+      try {
+        const prompts = buildPrompts(bug, actualJiraKey, actualReleaseBranch);
+        const result  = await chatApi.send(prompts[8], [], 'tech_lead', bug.id, bug.contextDomain);
+        const reply   = typeof result === 'string' ? result : (result as any).reply || '';
+        setStepResults(prev => ({ ...prev, 9: { status: 'done', response: reply, duration: Math.round((Date.now()-t0)/1000) } }));
+        setExpandedStep(9);
+        setSyncGateStatus('done');
+      } catch (e: any) {
+        setStepResults(prev => ({ ...prev, 9: { status: 'error', response: `Error: ${e.message}`, duration: Math.round((Date.now()-t0)/1000) } }));
+        setSyncGateStatus('done');
+      }
+    }
+
     setRunning(false); setCurrentStep(0); setShowRelease(true);
   };
 
@@ -343,9 +444,26 @@ export function Demo({ scrollToTop, onTabChange }: { scrollToTop?: () => void; o
     setShowCode(null); setGateStatus(null); setGateComment(''); setPrUrl(''); setPrNumber(null);
     setShowRelease(false); setReleaseResult(''); setReleaseRunning(false); setShowCommentBox(false);
     setOverallEval(null); setScanResult(null);
+    setReleaseBranchGate('idle'); setSelectedReleaseBranch('release/june-2026');
+    setNewReleaseName(''); setAvailableReleaseBranches([]); setCreatingReleaseBranch(false);
+    setSyncGateStatus('idle');
   };
 
-  const pipelineComplete = stepResults[7]?.status === 'done';
+  const pipelineComplete = stepResults[8]?.status === 'done';
+
+  // ── Gate badge styles ─────────────────────────────────────────────────────
+  const releaseBadgeStyle = () => {
+    if (releaseBranchGate === 'resolved') return { bg: '#F0FDF4', border: '0.5px solid #16A34A', color: '#15803D' };
+    if (releaseBranchGate === 'waiting')  return { bg: '#E0F2FE', border: '2px solid #0EA5E9',   color: '#0369A1' };
+    return { bg: 'var(--color-background-secondary)', border: '0.5px solid var(--color-border-tertiary)', color: 'var(--color-text-tertiary)' };
+  };
+
+  const syncBadgeStyle = () => {
+    if (syncGateStatus === 'done')    return { bg: '#F5F3FF', border: '0.5px solid #7C3AED', color: '#5B21B6' };
+    if (syncGateStatus === 'skipped') return { bg: 'var(--color-background-secondary)', border: '0.5px solid var(--color-border-secondary)', color: 'var(--color-text-tertiary)' };
+    if (syncGateStatus === 'waiting' || syncGateStatus === 'syncing') return { bg: '#F5F3FF', border: '2px solid #7C3AED', color: '#5B21B6' };
+    return { bg: 'var(--color-background-secondary)', border: '0.5px solid var(--color-border-tertiary)', color: 'var(--color-text-tertiary)' };
+  };
 
   return (
     <div style={{ padding: '24px', maxWidth: '960px', fontFamily: 'inherit' }}>
@@ -356,7 +474,7 @@ export function Demo({ scrollToTop, onTabChange }: { scrollToTop?: () => void; o
           HCSC / BCBS — Payer Claims Intelligence Demo
         </h2>
         <p style={{ fontSize: '13px', color: 'var(--color-text-secondary)', margin: '0 0 10px' }}>
-          AI agents across CTS · BDS · DB2 · ODS · Mainframe — full SDLC pipeline with human approval gate
+          AI agents across CTS · BDS · DB2 · ODS · Mainframe — 9-step SDLC pipeline with Gitflow, system test &amp; human gates
         </p>
         <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
           {['CTS (Core Adj)', 'BDS (Benefits)', 'DB2 / ODS', 'Mainframe COBOL', '17M Members'].map(tag => (
@@ -369,47 +487,44 @@ export function Demo({ scrollToTop, onTabChange }: { scrollToTop?: () => void; o
         <>
           {/* Bug list */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '20px' }}>
-            {BUGS.map(bug => {
-              return (
-                <div key={bug.id} onClick={() => !running && runDemo(bug)}
-                  style={{ background: 'var(--color-background-primary)', border: '0.5px solid var(--color-border-secondary)', borderRadius: '12px', padding: '16px', cursor: 'pointer', transition: 'all 0.15s' }}
-                  onMouseOver={e => { (e.currentTarget as HTMLElement).style.borderColor='#6366F1'; (e.currentTarget as HTMLElement).style.boxShadow='0 2px 12px rgba(99,102,241,0.1)'; }}
-                  onMouseOut={e =>  { (e.currentTarget as HTMLElement).style.borderColor='var(--color-border-secondary)'; (e.currentTarget as HTMLElement).style.boxShadow='none'; }}>
-                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
-                    <span style={{ fontSize: '11px', fontWeight: 600, padding: '3px 10px', borderRadius: '20px', flexShrink: 0, marginTop: '2px', background: bug.severity==='Critical'?'#FEE2E2':'#FEF3C7', color: bug.severity==='Critical'?'#991B1B':'#92400E' }}>
-                      {bug.severity}
-                    </span>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px', flexWrap: 'wrap' }}>
-                        <span style={{ fontSize: '11px', fontFamily: 'monospace', color: '#4F46E5', fontWeight: 600 }}>{bug.id}</span>
-                        <span style={{ fontSize: '10px', padding: '1px 7px', borderRadius: '20px', background: bug.contextDomain==='bds'?'#DBEAFE':'#E0E7FF', color: bug.contextDomain==='bds'?'#1D4ED8':'#4338CA', border: `0.5px solid ${bug.contextDomain==='bds'?'#93C5FD':'#A5B4FC'}` }}>
-                          {bug.domain}
-                        </span>
-                        <span style={{ fontSize: '10px', padding: '1px 7px', borderRadius: '20px', background: '#F3F4F6', color: '#6B7280', border: '0.5px solid #D1D5DB' }}>{bug.type}</span>
-                        {bug.compliance.map(c => (
-                          <span key={c} style={{ fontSize: '10px', padding: '1px 7px', borderRadius: '20px', background: '#ECFDF5', color: '#065F46', border: '0.5px solid #6EE7B7' }}>✓ {c}</span>
-                        ))}
-                      </div>
-                      <p style={{ fontSize: '14px', fontWeight: 600, margin: '0 0 3px', color: 'var(--color-text-primary)' }}>{bug.title}</p>
-                      <p style={{ fontSize: '12px', color: 'var(--color-text-secondary)', margin: '0 0 6px' }}>{bug.description}</p>
-                      <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap' }}>
-                        {bug.allowedTables.map(t => (
-                          <span key={t} style={{ fontSize: '10px', fontFamily: 'monospace', padding: '1px 6px', borderRadius: '4px', background: 'var(--color-background-secondary)', color: 'var(--color-text-tertiary)', border: '0.5px solid var(--color-border-tertiary)' }}>{t.split('.')[1]}</span>
-                        ))}
-                        <span style={{ fontSize: '10px', padding: '1px 6px', borderRadius: '4px', background: '#F5F3FF', color: '#7C3AED', border: '0.5px solid #DDD6FE' }}>🔒 {bug.policyKey}</span>
-                      </div>
+            {BUGS.map(bug => (
+              <div key={bug.id} onClick={() => !running && runDemo(bug)}
+                style={{ background: 'var(--color-background-primary)', border: '0.5px solid var(--color-border-secondary)', borderRadius: '12px', padding: '16px', cursor: 'pointer', transition: 'all 0.15s' }}
+                onMouseOver={e => { (e.currentTarget as HTMLElement).style.borderColor='#6366F1'; (e.currentTarget as HTMLElement).style.boxShadow='0 2px 12px rgba(99,102,241,0.1)'; }}
+                onMouseOut={e =>  { (e.currentTarget as HTMLElement).style.borderColor='var(--color-border-secondary)'; (e.currentTarget as HTMLElement).style.boxShadow='none'; }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
+                  <span style={{ fontSize: '11px', fontWeight: 600, padding: '3px 10px', borderRadius: '20px', flexShrink: 0, marginTop: '2px', background: bug.severity==='Critical'?'#FEE2E2':'#FEF3C7', color: bug.severity==='Critical'?'#991B1B':'#92400E' }}>
+                    {bug.severity}
+                  </span>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px', flexWrap: 'wrap' }}>
+                      <span style={{ fontSize: '11px', fontFamily: 'monospace', color: '#4F46E5', fontWeight: 600 }}>{bug.id}</span>
+                      <span style={{ fontSize: '10px', padding: '1px 7px', borderRadius: '20px', background: bug.contextDomain==='bds'?'#DBEAFE':'#E0E7FF', color: bug.contextDomain==='bds'?'#1D4ED8':'#4338CA', border: `0.5px solid ${bug.contextDomain==='bds'?'#93C5FD':'#A5B4FC'}` }}>
+                        {bug.domain}
+                      </span>
+                      <span style={{ fontSize: '10px', padding: '1px 7px', borderRadius: '20px', background: '#F3F4F6', color: '#6B7280', border: '0.5px solid #D1D5DB' }}>{bug.type}</span>
+                      {bug.compliance.map(c => (
+                        <span key={c} style={{ fontSize: '10px', padding: '1px 7px', borderRadius: '20px', background: '#ECFDF5', color: '#065F46', border: '0.5px solid #6EE7B7' }}>✓ {c}</span>
+                      ))}
                     </div>
-                    {/* Confidence score — shown after evaluation */}
-                    <div style={{ flexShrink: 0, textAlign: 'center', minWidth: '76px' }}>
-                      <div style={{ fontSize: '24px', fontWeight: 800, color: '#6366F1', lineHeight: 1 }}>—</div>
-                      <div style={{ fontSize: '9px', color: '#6366F1', fontWeight: 600, marginTop: '2px' }}>run to score</div>
-                      <div style={{ fontSize: '9px', color: 'var(--color-text-tertiary)', marginTop: '1px' }}>fix confidence</div>
+                    <p style={{ fontSize: '14px', fontWeight: 600, margin: '0 0 3px', color: 'var(--color-text-primary)' }}>{bug.title}</p>
+                    <p style={{ fontSize: '12px', color: 'var(--color-text-secondary)', margin: '0 0 6px' }}>{bug.description}</p>
+                    <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap' }}>
+                      {bug.allowedTables.map(t => (
+                        <span key={t} style={{ fontSize: '10px', fontFamily: 'monospace', padding: '1px 6px', borderRadius: '4px', background: 'var(--color-background-secondary)', color: 'var(--color-text-tertiary)', border: '0.5px solid var(--color-border-tertiary)' }}>{t.split('.')[1]}</span>
+                      ))}
+                      <span style={{ fontSize: '10px', padding: '1px 6px', borderRadius: '4px', background: '#F5F3FF', color: '#7C3AED', border: '0.5px solid #DDD6FE' }}>🔒 {bug.policyKey}</span>
                     </div>
-                    <div style={{ fontSize: '12px', color: 'var(--color-text-tertiary)', flexShrink: 0, marginTop: '6px' }}>▶ Run</div>
                   </div>
+                  <div style={{ flexShrink: 0, textAlign: 'center', minWidth: '76px' }}>
+                    <div style={{ fontSize: '24px', fontWeight: 800, color: '#6366F1', lineHeight: 1 }}>—</div>
+                    <div style={{ fontSize: '9px', color: '#6366F1', fontWeight: 600, marginTop: '2px' }}>run to score</div>
+                    <div style={{ fontSize: '9px', color: 'var(--color-text-tertiary)', marginTop: '1px' }}>fix confidence</div>
+                  </div>
+                  <div style={{ fontSize: '12px', color: 'var(--color-text-tertiary)', flexShrink: 0, marginTop: '6px' }}>▶ Run</div>
                 </div>
-              );
-            })}
+              </div>
+            ))}
           </div>
 
           {/* Scanner */}
@@ -430,10 +545,10 @@ export function Demo({ scrollToTop, onTabChange }: { scrollToTop?: () => void; o
             )}
           </div>
 
-          {/* Pipeline overview */}
+          {/* Pipeline overview — 9 steps + 3 gates */}
           <div style={{ background: 'var(--color-background-secondary)', borderRadius: '12px', padding: '14px' }}>
             <p style={{ fontSize: '11px', fontWeight: 600, color: 'var(--color-text-secondary)', margin: '0 0 10px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-              Agentic SDLC Pipeline — Policy-governed · Domain-bounded · Human approval gate
+              Agentic SDLC Pipeline — Gitflow · 3 Human gates · Jenkins system test
             </p>
             <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
               {PIPELINE_STEPS.map((step, idx) => (
@@ -441,14 +556,28 @@ export function Demo({ scrollToTop, onTabChange }: { scrollToTop?: () => void; o
                   <div style={{ fontSize: '11px', padding: '5px 10px', background: 'var(--color-background-primary)', border: '0.5px solid var(--color-border-tertiary)', borderRadius: '8px', color: 'var(--color-text-secondary)' }}>
                     {step.icon} {step.label}
                   </div>
-                  {idx === 5 && (
+                  {idx === 4 && (
                     <>
                       <span style={{ fontSize: '11px', color: 'var(--color-text-tertiary)' }}>→</span>
-                      <div style={{ fontSize: '11px', padding: '5px 10px', background: '#FEF3C7', border: '0.5px solid #F59E0B', borderRadius: '8px', color: '#92400E', fontWeight: 600 }}>⏸ Human approval</div>
+                      <div style={{ fontSize: '11px', padding: '5px 10px', background: '#E0F2FE', border: '0.5px solid #7DD3FC', borderRadius: '8px', color: '#0369A1', fontWeight: 600 }}>🌿 Release branch</div>
                       <span style={{ fontSize: '11px', color: 'var(--color-text-tertiary)' }}>→</span>
                     </>
                   )}
-                  {idx !== 5 && idx < PIPELINE_STEPS.length-1 && <span style={{ fontSize: '11px', color: 'var(--color-text-tertiary)' }}>→</span>}
+                  {idx === 5 && (
+                    <>
+                      <span style={{ fontSize: '11px', color: 'var(--color-text-tertiary)' }}>→</span>
+                      <div style={{ fontSize: '11px', padding: '5px 10px', background: '#FEF3C7', border: '0.5px solid #F59E0B', borderRadius: '8px', color: '#92400E', fontWeight: 600 }}>⏸ PR approval</div>
+                      <span style={{ fontSize: '11px', color: 'var(--color-text-tertiary)' }}>→</span>
+                    </>
+                  )}
+                  {idx === 7 && (
+                    <>
+                      <span style={{ fontSize: '11px', color: 'var(--color-text-tertiary)' }}>→</span>
+                      <div style={{ fontSize: '11px', padding: '5px 10px', background: '#F5F3FF', border: '0.5px solid #A78BFA', borderRadius: '8px', color: '#5B21B6', fontWeight: 600 }}>🔄 Sync gate</div>
+                      <span style={{ fontSize: '11px', color: 'var(--color-text-tertiary)' }}>→</span>
+                    </>
+                  )}
+                  {![4, 5, 7].includes(idx) && idx < PIPELINE_STEPS.length-1 && <span style={{ fontSize: '11px', color: 'var(--color-text-tertiary)' }}>→</span>}
                 </React.Fragment>
               ))}
             </div>
@@ -574,13 +703,15 @@ export function Demo({ scrollToTop, onTabChange }: { scrollToTop?: () => void; o
             ))}
           </div>
 
-          {/* Pipeline steps */}
+          {/* Pipeline steps row — 9 steps + 3 gate badges */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '12px', flexWrap: 'wrap' }}>
             {PIPELINE_STEPS.map((step, idx) => {
               const result   = stepResults[step.id];
               const isActive = currentStep === step.id;
               const isDone   = result?.status === 'done';
               const isError  = result?.status === 'error';
+              const rbs = releaseBadgeStyle();
+              const sbs = syncBadgeStyle();
               return (
                 <React.Fragment key={step.id}>
                   <button onClick={() => isDone && setExpandedStep(expandedStep===step.id?null:step.id)}
@@ -592,22 +723,49 @@ export function Demo({ scrollToTop, onTabChange }: { scrollToTop?: () => void; o
                     {step.label}
                     {isDone && result.duration>0 && <span style={{ fontSize: '10px', opacity: 0.7 }}>{result.duration}s</span>}
                   </button>
-                  {idx === 5 && (
+
+                  {/* Gate A badge — after step 5 (idx 4) */}
+                  {idx === 4 && (
                     <>
                       <span style={{ fontSize: '11px', color: 'var(--color-text-tertiary)' }}>→</span>
-                      <div style={{ fontSize: '11px', padding: '6px 10px', borderRadius: '8px', fontWeight: 600, background: gateStatus==='approved'?'#F0FDF4':gateStatus==='rejected'?'#FEF2F2':gateStatus==='waiting'?'#FFFBEB':'var(--color-background-secondary)', border: gateStatus==='approved'?'0.5px solid #16A34A':gateStatus==='rejected'?'0.5px solid #E24B4A':gateStatus==='waiting'?'2px solid #F59E0B':'0.5px solid var(--color-border-tertiary)', color: gateStatus==='approved'?'#15803D':gateStatus==='rejected'?'#B91C1C':gateStatus==='waiting'?'#92400E':'var(--color-text-tertiary)' }}>
-                        {gateStatus==='approved'?'✓ Approved':gateStatus==='rejected'?'✗ Rejected':gateStatus==='changes_requested'?'↩ Changes':gateStatus==='waiting'?'⏸ Awaiting':'⏸ Human gate'}
+                      <div style={{ fontSize: '11px', padding: '6px 10px', borderRadius: '8px', fontWeight: 600, background: rbs.bg, border: rbs.border, color: rbs.color }}>
+                        {releaseBranchGate === 'resolved' ? `✓ ${selectedReleaseBranch}` : releaseBranchGate === 'waiting' ? '🌿 Select branch' : '🌿 Release branch'}
                       </div>
                       <span style={{ fontSize: '11px', color: 'var(--color-text-tertiary)' }}>→</span>
                     </>
                   )}
-                  {idx !== 5 && idx < PIPELINE_STEPS.length-1 && <span style={{ fontSize: '11px', color: 'var(--color-text-tertiary)' }}>→</span>}
+
+                  {/* Gate B badge — after step 6 (idx 5) */}
+                  {idx === 5 && (
+                    <>
+                      <span style={{ fontSize: '11px', color: 'var(--color-text-tertiary)' }}>→</span>
+                      <div style={{ fontSize: '11px', padding: '6px 10px', borderRadius: '8px', fontWeight: 600, background: gateStatus==='approved'?'#F0FDF4':gateStatus==='rejected'?'#FEF2F2':gateStatus==='waiting'?'#FFFBEB':'var(--color-background-secondary)', border: gateStatus==='approved'?'0.5px solid #16A34A':gateStatus==='rejected'?'0.5px solid #E24B4A':gateStatus==='waiting'?'2px solid #F59E0B':'0.5px solid var(--color-border-tertiary)', color: gateStatus==='approved'?'#15803D':gateStatus==='rejected'?'#B91C1C':gateStatus==='waiting'?'#92400E':'var(--color-text-tertiary)' }}>
+                        {gateStatus==='approved'?'✓ PR approved':gateStatus==='rejected'?'✗ Rejected':gateStatus==='changes_requested'?'↩ Changes':gateStatus==='waiting'?'⏸ Awaiting PR':'⏸ PR approval'}
+                      </div>
+                      <span style={{ fontSize: '11px', color: 'var(--color-text-tertiary)' }}>→</span>
+                    </>
+                  )}
+
+                  {/* Gate C badge — after step 8 (idx 7) */}
+                  {idx === 7 && (
+                    <>
+                      <span style={{ fontSize: '11px', color: 'var(--color-text-tertiary)' }}>→</span>
+                      <div style={{ fontSize: '11px', padding: '6px 10px', borderRadius: '8px', fontWeight: 600, background: sbs.bg, border: sbs.border, color: sbs.color }}>
+                        {syncGateStatus === 'done' ? '✓ Synced' : syncGateStatus === 'skipped' ? '— Skipped' : syncGateStatus === 'syncing' ? '🔄 Syncing...' : syncGateStatus === 'waiting' ? '🔄 Sync?' : '🔄 Sync gate'}
+                      </div>
+                      <span style={{ fontSize: '11px', color: 'var(--color-text-tertiary)' }}>→</span>
+                    </>
+                  )}
+
+                  {![4, 5, 7].includes(idx) && idx < PIPELINE_STEPS.length-1 && (
+                    <span style={{ fontSize: '11px', color: 'var(--color-text-tertiary)' }}>→</span>
+                  )}
                 </React.Fragment>
               );
             })}
           </div>
 
-          {/* Expanded step */}
+          {/* Expanded step panel */}
           {expandedStep && stepResults[expandedStep] && (
             <div style={{ background: 'var(--color-background-primary)', border: '0.5px solid var(--color-border-secondary)', borderRadius: '12px', padding: '14px', marginBottom: '12px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
@@ -636,17 +794,65 @@ export function Demo({ scrollToTop, onTabChange }: { scrollToTop?: () => void; o
             </div>
           )}
 
-          {/* Human gate */}
+          {/* Gate A — Release branch selection */}
+          {releaseBranchGate === 'waiting' && (
+            <div style={{ background: '#F0F9FF', border: '2px solid #0EA5E9', borderRadius: '12px', padding: '18px', marginBottom: '12px' }}>
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px', marginBottom: '14px' }}>
+                <span style={{ fontSize: '22px' }}>🌿</span>
+                <div>
+                  <p style={{ fontSize: '14px', fontWeight: 700, color: '#0C4A6E', margin: '0 0 3px' }}>Select Release Branch</p>
+                  <p style={{ fontSize: '12px', color: '#0369A1', margin: 0 }}>
+                    The fix branch will be cut from <code style={{ background: '#BAE6FD', padding: '1px 5px', borderRadius: '4px' }}>develop</code> and a PR will target the release branch you choose below.
+                  </p>
+                </div>
+              </div>
+
+              {/* Existing branches */}
+              {availableReleaseBranches.length > 0 && (
+                <div style={{ marginBottom: '12px' }}>
+                  <p style={{ fontSize: '11px', color: '#0369A1', fontWeight: 600, margin: '0 0 6px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Existing release branches</p>
+                  <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                    {availableReleaseBranches.map(b => (
+                      <button key={b} onClick={() => handleSelectReleaseBranch(b)}
+                        style={{ padding: '7px 14px', borderRadius: '8px', border: selectedReleaseBranch===b ? '2px solid #0EA5E9' : '0.5px solid #BAE6FD', background: selectedReleaseBranch===b ? '#E0F2FE' : 'white', color: '#0369A1', fontSize: '12px', fontWeight: 600, cursor: 'pointer', fontFamily: 'monospace' }}>
+                        {b}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Create new branch */}
+              <div>
+                <p style={{ fontSize: '11px', color: '#0369A1', fontWeight: 600, margin: '0 0 6px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Or create a new release branch</p>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <input
+                    value={newReleaseName}
+                    onChange={e => setNewReleaseName(e.target.value)}
+                    placeholder="release/aug-2026"
+                    style={{ flex: 1, padding: '7px 10px', borderRadius: '8px', border: '0.5px solid #BAE6FD', fontSize: '12px', fontFamily: 'monospace', color: '#0C4A6E', background: 'white' }}
+                  />
+                  <button onClick={handleCreateAndSelectReleaseBranch} disabled={!newReleaseName || creatingReleaseBranch}
+                    style={{ padding: '7px 14px', borderRadius: '8px', border: 'none', background: !newReleaseName || creatingReleaseBranch ? '#E2E8F0' : '#0EA5E9', color: !newReleaseName || creatingReleaseBranch ? '#94A3B8' : 'white', fontSize: '12px', fontWeight: 600, cursor: !newReleaseName || creatingReleaseBranch ? 'default' : 'pointer', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    {creatingReleaseBranch && <div style={{ width: '10px', height: '10px', borderRadius: '50%', border: '2px solid #94A3B8', borderTopColor: 'transparent', animation: 'spin 0.8s linear infinite' }} />}
+                    {creatingReleaseBranch ? 'Creating...' : '+ Create & Select'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Gate B — PR approval */}
           {gateStatus === 'waiting' && (
             <div style={{ background: '#FFFBEB', border: '2px solid #F59E0B', borderRadius: '12px', padding: '18px', marginBottom: '12px' }}>
               <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px', marginBottom: '14px' }}>
                 <span style={{ fontSize: '22px' }}>⏸</span>
                 <div>
-                  <p style={{ fontSize: '14px', fontWeight: 700, color: '#92400E', margin: '0 0 3px' }}>Human Approval Gate</p>
+                  <p style={{ fontSize: '14px', fontWeight: 700, color: '#92400E', margin: '0 0 3px' }}>Human Approval Gate — PR Review</p>
                   <p style={{ fontSize: '12px', color: '#B45309', margin: 0 }}>
-                    AI proposed fix, created PR, self-evaluated. Your approval required before code review.
+                    PR opened on <code style={{ background: '#FDE68A', padding: '1px 5px', borderRadius: '4px' }}>{selectedReleaseBranch}</code>. Review the code in GitHub, then approve to continue to code review.
                     <br /><strong>Boundary: </strong>scoped to {selectedBug.allowedFiles[0]} · Tables: {selectedBug.allowedTables.join(', ')}
-                    {overallEval && <><br /><strong>Fix confidence: </strong><span style={{ color: scoreColor(overallEval.score), fontWeight: 700 }}>{Math.round(overallEval.score*100)}% — {scoreLabel(overallEval.score)}</span></>}
+                    {overallEval && !overallEval.evalRunning && <><br /><strong>Fix confidence: </strong><span style={{ color: scoreColor(overallEval.score), fontWeight: 700 }}>{Math.round(overallEval.score*100)}% — {scoreLabel(overallEval.score)}</span></>}
                   </p>
                 </div>
               </div>
@@ -686,16 +892,48 @@ export function Demo({ scrollToTop, onTabChange }: { scrollToTop?: () => void; o
             </div>
           )}
 
-          {/* Complete */}
+          {/* System test complete banner */}
           {pipelineComplete && (
             <div style={{ background: '#F0FDF4', border: '0.5px solid #16A34A', borderRadius: '12px', padding: '14px', marginBottom: '12px' }}>
-              <p style={{ fontSize: '14px', fontWeight: 700, color: '#15803D', margin: '0 0 6px' }}>✅ Pipeline complete — PR reviewed and ready to merge</p>
+              <p style={{ fontSize: '14px', fontWeight: 700, color: '#15803D', margin: '0 0 6px' }}>✅ System test passed — fix verified on <code style={{ background: '#BBF7D0', padding: '1px 6px', borderRadius: '4px' }}>{selectedReleaseBranch}</code></p>
               <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
                 <span style={{ fontSize: '11px', color: '#166534' }}>⏱ {Object.values(stepResults).reduce((s,r)=>s+(r.duration||0),0)}s total</span>
-                {overallEval && <span style={{ fontSize: '11px', color: scoreColor(overallEval.score) }}>🎯 {Math.round(overallEval.score*100)}% fix confidence</span>}
+                {overallEval && !overallEval.evalRunning && <span style={{ fontSize: '11px', color: scoreColor(overallEval.score) }}>🎯 {Math.round(overallEval.score*100)}% fix confidence</span>}
                 <span style={{ fontSize: '11px', color: '#166534' }}>🔒 {selectedBug.policyKey}</span>
                 <span style={{ fontSize: '11px', color: '#166534' }}>✓ {selectedBug.compliance.join(' + ')}</span>
               </div>
+            </div>
+          )}
+
+          {/* Gate C — Sync to develop */}
+          {syncGateStatus === 'waiting' && (
+            <div style={{ background: '#F5F3FF', border: '2px solid #7C3AED', borderRadius: '12px', padding: '18px', marginBottom: '12px' }}>
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px', marginBottom: '14px' }}>
+                <span style={{ fontSize: '22px' }}>🔄</span>
+                <div>
+                  <p style={{ fontSize: '14px', fontWeight: 700, color: '#4C1D95', margin: '0 0 3px' }}>Sync Fix to Develop?</p>
+                  <p style={{ fontSize: '12px', color: '#5B21B6', margin: 0 }}>
+                    System tests passed on <code style={{ background: '#DDD6FE', padding: '1px 5px', borderRadius: '4px' }}>{selectedReleaseBranch}</code>. Sync this fix back to <code style={{ background: '#DDD6FE', padding: '1px 5px', borderRadius: '4px' }}>develop</code> so it's included in the next production release cycle.
+                  </p>
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button onClick={handleSyncYes} style={{ padding: '8px 18px', borderRadius: '8px', border: 'none', background: '#7C3AED', color: 'white', fontSize: '13px', fontWeight: 600, cursor: 'pointer' }}>🔄 Yes, Sync to Develop</button>
+                <button onClick={handleSyncSkip} style={{ padding: '8px 16px', borderRadius: '8px', border: '0.5px solid #7C3AED', background: 'white', color: '#7C3AED', fontSize: '13px', fontWeight: 500, cursor: 'pointer' }}>Skip for Now</button>
+              </div>
+            </div>
+          )}
+
+          {syncGateStatus === 'done' && (
+            <div style={{ background: '#F5F3FF', border: '0.5px solid #7C3AED', borderRadius: '12px', padding: '14px', marginBottom: '12px' }}>
+              <p style={{ fontSize: '14px', fontWeight: 700, color: '#5B21B6', margin: '0 0 4px' }}>✅ Synced to develop — fix available for next production release</p>
+              <p style={{ fontSize: '12px', color: '#6D28D9', margin: 0 }}>PR opened from <code style={{ background: '#DDD6FE', padding: '1px 4px', borderRadius: '4px' }}>{selectedReleaseBranch}</code> → <code style={{ background: '#DDD6FE', padding: '1px 4px', borderRadius: '4px' }}>develop</code></p>
+            </div>
+          )}
+
+          {syncGateStatus === 'skipped' && (
+            <div style={{ background: 'var(--color-background-secondary)', border: '0.5px solid var(--color-border-secondary)', borderRadius: '12px', padding: '14px', marginBottom: '12px' }}>
+              <p style={{ fontSize: '13px', color: 'var(--color-text-secondary)', margin: 0 }}>Sync skipped — run <code>github_integration sync_to_develop</code> manually when ready.</p>
             </div>
           )}
 
@@ -705,7 +943,7 @@ export function Demo({ scrollToTop, onTabChange }: { scrollToTop?: () => void; o
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                 <div>
                   <p style={{ fontSize: '14px', fontWeight: 600, color: 'var(--color-text-primary)', margin: '0 0 2px' }}>🚀 Release Notes</p>
-                  <p style={{ fontSize: '12px', color: 'var(--color-text-secondary)', margin: 0 }}>Merge the PR first, then generate v1.1.0 release notes with compliance summary</p>
+                  <p style={{ fontSize: '12px', color: 'var(--color-text-secondary)', margin: 0 }}>Generate v1.1.0 release notes with compliance summary for <code>{selectedReleaseBranch}</code></p>
                 </div>
                 <button onClick={generateReleaseNotes} disabled={releaseRunning}
                   style={{ padding: '8px 16px', borderRadius: '8px', border: 'none', background: releaseRunning?'var(--color-background-secondary)':'#4F46E5', color: releaseRunning?'var(--color-text-secondary)':'white', fontSize: '13px', fontWeight: 600, cursor: releaseRunning?'default':'pointer', display: 'flex', alignItems: 'center', gap: '6px' }}>

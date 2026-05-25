@@ -13,6 +13,7 @@ import app.models.claims      # noqa: F401
 
 from app.api.routes import chat, sprints, stories, standup, jira
 from app.api.routes import metrics
+from app.api.routes import github
 
 
 @asynccontextmanager
@@ -47,6 +48,7 @@ app.include_router(stories.router, prefix="/api/stories", tags=["stories"])
 app.include_router(standup.router, prefix="/api/standup", tags=["standup"])
 app.include_router(jira.router,    prefix="/api/jira",    tags=["jira"])
 app.include_router(metrics.router, prefix="/api/metrics", tags=["metrics"])
+app.include_router(github.router,  prefix="/api/github",  tags=["github"])
 
 
 @app.get("/health")

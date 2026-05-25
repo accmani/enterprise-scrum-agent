@@ -34,6 +34,7 @@ from app.agents.tools.db_agent_tool import DBAgentTool
 from app.agents.tools.metrics_tool import MetricsTool
 from app.agents.tools.scanner_tool import ScannerTool
 from app.agents.tools.evaluator_tool import EvaluatorTool
+from app.agents.tools.jenkins_tool import JenkinsTool
 
 
 _REACT_SUFFIX = """
@@ -69,6 +70,8 @@ RULES:
 - For database/claims queries: use db_agent
 - For performance metrics: use metrics_tool
 - For general Agile advice: go straight to Final Answer without tools
+- For system test / Jenkins builds: use jenkins_agent
+- For release branch list or sync to develop: use github_integration
 
 SDLC AUTO-FIX FLOW — when asked to fix a bug:
 Step 1: Call github_integration ONCE with operation=auto_fix
@@ -81,11 +84,25 @@ Step 4: NEVER retry after receiving auto_fix_complete=true OR duplicate=true
 Step 5: A response containing pr_url, pr_number, or duplicate=true means SUCCESS — stop immediately
 
 GITFLOW BRANCH STRATEGY (follow this for ALL branch and PR operations):
-- develop        → integration base; all fix branches cut from here
-- fix/ST-{n}-*   → one branch per Jira ticket, branched from develop
-- release/mmm-yyyy → release candidate; all fix PRs target here for system testing
-- main           → production; only release branch merges in after sign-off
-- hotfix/ST-{n}-* → cut from main for critical prod fixes, merge back to main AND develop
+- develop          → integration base; all fix branches cut from here
+- fix/ST-{n}-*     → one branch per Jira ticket, branched from develop
+- release/mmm-yyyy → release candidate; fix PRs target here; system test runs on this branch
+- main             → production; only release branch merges in after sign-off
+- hotfix/ST-{n}-*  → cut from main for critical prod fixes, merge back to main AND develop
+
+FULL SDLC CYCLE (steps in order):
+1. Detect defect (scanner)
+2. Create Jira ticket
+3. Plan sprint
+4. Technical design
+5. Generate tests
+--- USER SELECTS RELEASE BRANCH (e.g. release/june-2026) ---
+6. Code fix: cut fix/ST-N-* from develop, commit fix, open PR → release branch
+7. Code review
+--- HUMAN APPROVES PR AND MERGES TO RELEASE BRANCH ---
+8. System test: trigger Jenkins build on release branch via jenkins_agent
+--- USER DECIDES WHETHER TO SYNC TO DEVELOP ---
+9. Sync to develop: open PR from release branch → develop via github_integration sync_to_develop
 
 Begin!
 
@@ -174,6 +191,7 @@ class ScrumMRKLAgent:
         tools: list[BaseTool] = []
         tools.append(ScannerTool())
         tools.append(EvaluatorTool())
+        tools.append(JenkinsTool())
         for name, cls in _TOOL_REGISTRY.items():
             if allowed and name not in allowed:
                 continue

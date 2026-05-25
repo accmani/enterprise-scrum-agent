@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     base_branch: str = "develop"
     release_branch: str = "release/june-2026"
 
+    # Jenkins CI
+    jenkins_url: str = ""
+    jenkins_user: str = ""
+    jenkins_token: str = ""
+    jenkins_job_name: str = "healthcare-claims"
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
     @property

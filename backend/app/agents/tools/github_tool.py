@@ -316,6 +316,52 @@ class GitHubTool(BaseTool):
                     "jira_key": jira_key
                 })
 
+            # ── LIST RELEASE BRANCHES ────────────────────────────────────
+            if operation == "list_release_branches" or "release branches" in q or "list release" in q:
+                resp = httpx.get(
+                    f"{base_url}/branches",
+                    headers=headers,
+                    params={"per_page": 50},
+                    timeout=15,
+                )
+                if resp.status_code == 200:
+                    releases = [b["name"] for b in resp.json() if b["name"].startswith("release/")]
+                    return json.dumps({"release_branches": releases, "count": len(releases)})
+                return json.dumps({"error": "Could not list branches", "release_branches": []})
+
+            # ── SYNC TO DEVELOP ────────────────────────────────────────────
+            if operation == "sync_to_develop" or "sync to develop" in q or "merge to develop" in q:
+                source = parsed.get("source", settings.release_branch)
+                pr_resp = httpx.post(
+                    f"{base_url}/pulls",
+                    headers=headers,
+                    json={
+                        "title": f"chore: sync {source} → develop",
+                        "body": (
+                            f"## Release sync — {source} → develop\n\n"
+                            f"Merging `{source}` into `develop` after successful system testing "
+                            f"and production release sign-off.\n\n"
+                            f"### Checklist\n"
+                            f"- [ ] All system tests passed on `{source}`\n"
+                            f"- [ ] Released to production from `{source}`\n"
+                            f"- [ ] No open blocking issues on `{source}`"
+                        ),
+                        "head": source,
+                        "base": "develop",
+                    },
+                    timeout=15,
+                )
+                data = pr_resp.json()
+                if pr_resp.status_code in (200, 201):
+                    return json.dumps({
+                        "created": True,
+                        "pr_number": data.get("number"),
+                        "pr_url": data.get("html_url"),
+                        "title": f"sync {source} → develop",
+                        "message": f"PR created to sync '{source}' into develop — merge to complete production cycle.",
+                    })
+                return json.dumps({"error": data.get("message", "Could not create sync PR"), "details": data.get("errors", [])})
+
             # ── CREATE ISSUE ──────────────────────────────────────────────
             if "create issue" in q or "new issue" in q:
                 title = pr_title or parsed_query if 'parsed_query' in dir() else query
