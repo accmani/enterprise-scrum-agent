@@ -29,6 +29,8 @@ class ChatRequest(BaseModel):
     bug_type: Optional[str] = None
     # Skip ReAct agent — use direct LLM call (for analysis steps that need no tools)
     direct_llm: Optional[bool] = False
+    # Skip orchestrator — run a single focused ScrumMRKLAgent (for tool steps in the pipeline)
+    single_agent: Optional[bool] = False
     # Evaluation fields — passed when step 6 completes
     evaluate_fix: Optional[bool] = False
     fixed_code: Optional[str] = None
@@ -122,6 +124,24 @@ async def chat(request: ChatRequest, db: AsyncSession = Depends(get_db)):
         ])
         return ChatResponse(
             reply=_resp.content,
+            persona=persona,
+            duration_ms=int((time.time() - t0) * 1000),
+            policy_domain=policy.domain,
+            policy_tools=policy.tools,
+            compliance_checks=policy.compliance_checks,
+        )
+
+    # ── Single-agent path (bypasses orchestrator task decomposition) ────────
+    # Used for pipeline steps that already specify exactly one tool to call.
+    # Skips: multi-step planning, multi-agent chaining, quality retry loop.
+    if request.single_agent:
+        from app.agents.mrkl_agent import ScrumMRKLAgent
+        t0 = time.time()
+        _persona_cfg = PERSONAS.get(persona, {})
+        _agent = ScrumMRKLAgent(db_session=db, persona=persona, persona_config=_persona_cfg)
+        _reply = await _agent.run(enhanced_message)
+        return ChatResponse(
+            reply=_reply,
             persona=persona,
             duration_ms=int((time.time() - t0) * 1000),
             policy_domain=policy.domain,

@@ -1,11 +1,11 @@
-"""
+﻿"""
 DB Agent Tool — queries the seeded healthcare_claims table to demonstrate
 database-driven AI use cases: overcharge detection, denial analysis,
 eligibility checks, prior-auth gaps, and ICD-10 validation.
 """
 import json
 import sqlite3
-from langchain.tools import BaseTool
+from langchain_classic.tools import BaseTool
 from pydantic import BaseModel, Field
 from app.config import settings
 

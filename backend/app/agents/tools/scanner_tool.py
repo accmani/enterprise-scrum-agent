@@ -1,4 +1,4 @@
-"""
+﻿"""
 Scanner Tool — LLM-First Autonomous Defect Detection.
 
 Design principles:
@@ -21,7 +21,7 @@ import json
 import re
 import httpx
 import base64
-from langchain.tools import BaseTool
+from langchain_classic.tools import BaseTool
 from langchain_openai import AzureChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field

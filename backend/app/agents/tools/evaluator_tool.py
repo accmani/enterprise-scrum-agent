@@ -1,4 +1,4 @@
-"""
+﻿"""
 Evaluator Tool — LLM self-evaluation of agent-generated fixes.
 
 Option B implementation:
@@ -12,7 +12,7 @@ Used in step 6 of the SDLC pipeline after auto_fix completes.
 
 import json
 import re
-from langchain.tools import BaseTool
+from langchain_classic.tools import BaseTool
 from pydantic import BaseModel, Field
 from langchain_openai import AzureChatOpenAI
 from app.config import settings

@@ -1,4 +1,4 @@
-from langchain.tools import BaseTool
+﻿from langchain_classic.tools import BaseTool
 from langchain_openai import ChatOpenAI, AzureChatOpenAI
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
@@ -20,10 +20,26 @@ class QATool(BaseTool):
     args_schema: type[BaseModel] = QAQueryInput
 
     def _run(self, query: str) -> str:
+        import asyncio as _asyncio
+        try:
+            loop = _asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    future = pool.submit(_asyncio.run, self._arun(query))
+                    return future.result(timeout=60)
+        except Exception:
+            pass
         return self._execute(query)
 
     async def _arun(self, query: str) -> str:
-        return self._execute(query)
+        try:
+            prompt = self._build_prompt(query)
+            llm = self._get_llm()
+            response = await llm.ainvoke([HumanMessage(content=prompt)])
+            return response.content
+        except Exception as e:
+            return json.dumps({"error": str(e)})
 
     def _get_llm(self):
         if settings.azure_openai_endpoint:
@@ -36,9 +52,8 @@ class QATool(BaseTool):
             )
         return ChatOpenAI(model=settings.openai_model, api_key=settings.openai_api_key, temperature=0)
 
-    def _execute(self, query: str) -> str:
-        try:
-            prompt = f"""You are a QA Lead for a healthcare claims processing system.
+    def _build_prompt(self, query: str) -> str:
+        return f"""You are a QA Lead for a healthcare claims processing system.
 
 Given this bug fix or feature:
 "{query}"
@@ -54,8 +69,10 @@ Generate a comprehensive test plan covering:
 
 Be specific — use realistic claim amounts, member IDs, and service types from a healthcare context."""
 
+    def _execute(self, query: str) -> str:
+        try:
             llm = self._get_llm()
-            response = llm.invoke([HumanMessage(content=prompt)])
+            response = llm.invoke([HumanMessage(content=self._build_prompt(query))])
             return response.content
         except Exception as e:
             return json.dumps({"error": str(e)})

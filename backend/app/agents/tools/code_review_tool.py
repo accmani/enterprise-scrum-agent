@@ -1,4 +1,4 @@
-from langchain.tools import BaseTool
+﻿from langchain_classic.tools import BaseTool
 from langchain_openai import ChatOpenAI, AzureChatOpenAI
 from pydantic import BaseModel, Field
 from app.config import settings

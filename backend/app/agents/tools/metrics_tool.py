@@ -1,10 +1,10 @@
-"""
+﻿"""
 Metrics Tool — queries the agent_metrics table to surface performance analytics.
 Shows: defects fixed, resolution time, agent utilization, category breakdown.
 """
 import json
 import sqlite3
-from langchain.tools import BaseTool
+from langchain_classic.tools import BaseTool
 from pydantic import BaseModel, Field
 from app.config import settings
 

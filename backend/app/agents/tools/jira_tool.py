@@ -1,4 +1,4 @@
-from langchain.tools import BaseTool
+﻿from langchain_classic.tools import BaseTool
 from pydantic import BaseModel, Field
 from app.config import settings
 import json
@@ -55,6 +55,38 @@ class JiraTool(BaseTool):
             "Authorization": f"Basic {credentials}",
             "Content-Type": "application/json",
         }
+
+    def _get_assignee_for_domain(self, domain: str, base_url: str, headers: dict) -> str | None:
+        """Return the accountId of the best available team member for this domain."""
+        domain_lower = domain.lower()
+        # Role preference by domain
+        role_hint = "developer" if any(k in domain_lower for k in ["bds", "cts", "claims", "batch"]) else "member"
+        try:
+            resp = httpx.get(
+                f"{base_url}/rest/api/3/user/assignable/search",
+                headers=headers,
+                params={"project": settings.jira_project_key, "maxResults": 20},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                users = resp.json()
+                if not isinstance(users, list):
+                    return None
+                # Filter out service accounts / the bot (current API user)
+                human_users = [
+                    u for u in users
+                    if u.get("accountType") in ("atlassian", None)
+                    and u.get("emailAddress", "") != settings.jira_username
+                    and u.get("active", True)
+                ]
+                if human_users:
+                    return human_users[0].get("accountId")
+                # Fall back: include all users (even the bot)
+                if users:
+                    return users[0].get("accountId")
+        except Exception:
+            pass
+        return None
 
     def _resolve_epic_name(self, domain: str) -> str:
         """Return the Epic name for a given bug domain."""
@@ -168,6 +200,11 @@ class JiraTool(BaseTool):
                         ],
                     },
                 }
+                # ── Auto-assign to a team member ──────────────────────────────
+                assignee_id = self._get_assignee_for_domain(domain or "general", base_url, headers)
+                if assignee_id:
+                    fields["assignee"] = {"accountId": assignee_id}
+
                 # ── Auto-assign to active sprint ─────────────────────────────
                 try:
                     sprint_resp = httpx.get(
@@ -222,6 +259,7 @@ class JiraTool(BaseTool):
                     "summary": summary,
                     "issue_type": issue_type,
                     "epic_linked": bool(epic_key and created_ok),
+                    "assigned_to": assignee_id or "unassigned",
                 }
                 if epic_key:
                     result["epic_key"] = epic_key
@@ -248,10 +286,25 @@ class JiraTool(BaseTool):
                         )
                         result["status"] = vdata.get("status", {}).get("name", "To Do")
 
+                # Fetch assignee display name for the message
+                assignee_name = "unassigned"
+                if assignee_id:
+                    try:
+                        au = httpx.get(
+                            f"{base_url}/rest/api/3/user",
+                            headers=headers,
+                            params={"accountId": assignee_id},
+                            timeout=8,
+                        )
+                        if au.status_code == 200:
+                            assignee_name = au.json().get("displayName", assignee_id)
+                            result["assigned_to"] = assignee_name
+                    except Exception:
+                        pass
+
                 result["message"] = (
-                    f"Successfully created {issue_type} {issue_key} and linked it under Epic "
-                    f"{epic_key} ({epic_name})." if epic_key else
-                    f"Successfully created {issue_type} {issue_key}."
+                    f"Successfully created {issue_type} {issue_key}, assigned to {assignee_name}"
+                    + (f", linked under Epic {epic_key} ({epic_name})." if epic_key else ".")
                 )
                 return json.dumps(result)
 

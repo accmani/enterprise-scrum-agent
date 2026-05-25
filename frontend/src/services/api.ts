@@ -18,6 +18,7 @@ export const chatApi = {
     domain?: string,
     bugType?: string,
     directLlm?: boolean,
+    singleAgent?: boolean,
   ): Promise<{
     reply: string;
     persona?: string;
@@ -49,7 +50,8 @@ export const chatApi = {
       ...(bugId     && { bug_id: bugId }),
       ...(domain    && { domain }),
       ...(bugType   && { bug_type: bugType }),
-      ...(directLlm && { direct_llm: true }),
+      ...(directLlm   && { direct_llm: true }),
+      ...(singleAgent && { single_agent: true }),
     });
     return data;
   },

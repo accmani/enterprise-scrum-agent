@@ -185,8 +185,8 @@ const buildPrompts = (bug: typeof BUGS[0], jiraKey: string, releaseBranch = 'rel
   `You are an HCSC claims system expert. Analyze this defect with domain context:\nBug: ${bug.id} — ${bug.title}\nDomain: ${bug.domain}\nFile: ${bug.file}\nDescription: ${bug.description}\nBusiness Impact: ${bug.businessImpact}\nAffected Tables: ${bug.allowedTables.join(', ')}\nCompliance: ${bug.compliance.join(', ')}\n\nProvide: (1) root cause in DB2/ODS context, (2) which table fields are affected and why, (3) CMS/HIPAA compliance implications, (4) confidence score 0-100% in your diagnosis.\n\nAnswer directly from your HCSC expert knowledge — go straight to Final Answer, no tools needed.`,
   `Use the jira_integration tool ONCE to create a Jira issue:\n- operation: create_issue\n- title: Fix: ${bug.title}\n- domain: ${bug.contextDomain}\n- priority: ${bug.severity}\n- description: ${bug.description} | Impact: ${bug.businessImpact} | Tables: ${bug.allowedTables.join(', ')} | Compliance: ${bug.compliance.join('+')}\nCall ONCE only.`,
   `Use the sprint_manager tool: 1) List active sprint, 2) Estimate story points for: "${bug.title}" — ${bug.severity} ${bug.type} defect in ${bug.domain}, 3) Recommend sprint assignment. Consider: compliance=${bug.compliance.join('+')}, tables=${bug.allowedTables.join(', ')}.`,
-  `Use the design_agent tool for: ${bug.title}\nFile: ${bug.file}\nTables: ${bug.allowedTables.join(', ')}\nDescription: ${bug.description}\nCompliance: ${bug.compliance.join(', ')}\n\nInclude: (1) root cause in DB2/ODS context, (2) before/after code, (3) affected table fields and why, (4) risk assessment with CMS/HIPAA implications, (5) boundary condition test strategy.`,
-  `Use the qa_agent tool for: ${bug.title}\nDomain: ${bug.domain}\nTables: ${bug.allowedTables.join(', ')}\n\nGenerate: (1) bug reproduction test, (2) fix verification test, (3) boundary condition tests — especially the == 0 or exact boundary, (4) HIPAA test — no PHI in error messages, (5) BDD scenarios.`,
+  `You are a senior software architect for HCSC healthcare claims.\n\nProduce a technical design document for this bug fix:\nBug: ${bug.title}\nFile: ${bug.file}\nTables: ${bug.allowedTables.join(', ')}\nDescription: ${bug.description}\nCompliance: ${bug.compliance.join(', ')}\n\nInclude:\n1. Root cause — exactly which code path fails and why\n2. Before/After code — the broken snippet vs. the fixed snippet\n3. Affected DB2/ODS table fields and how they're impacted\n4. Risk assessment — HIPAA/CMS compliance implications, rollback plan\n5. Boundary condition test strategy — list the key edge cases to cover\n6. Story points estimate (XS=1, S=2, M=3, L=5, XL=8) with rationale`,
+  `You are the QA Lead for HCSC healthcare claims processing.\n\nGenerate a comprehensive test plan for this fix:\nBug: ${bug.title}\nDomain: ${bug.domain}\nTables: ${bug.allowedTables.join(', ')}\n\nDeliver:\n1. Bug reproduction test — exact inputs that trigger the defect\n2. Fix verification test — inputs that confirm the fix works\n3. BDD scenarios (Given/When/Then) — happy path, boundary (== 0 / null), negative case\n4. Edge cases — at least 4 specific to this bug (null, zero, overflow, concurrent access)\n5. Regression checks — adjacent code areas to re-test\n6. HIPAA / PHI checks — confirm no patient data leaks into error messages or logs`,
   `Use the github_integration tool with operation=auto_fix. Call ONCE with EXACTLY this JSON — do not modify fixed_code:\n{"operation": "auto_fix", "bug": "${bug.title}", "file": "${bug.file}", "fixed_code": ${JSON.stringify(bug.fixedCode)}, "jira_key": "${jiraKey}", "base": "develop", "release_branch": "${releaseBranch}"}`,
   `Use the code_review_agent to review the latest open PR for ${jiraKey}.\nFix: ${bug.title} | Domain: ${bug.domain} | Tables: ${bug.allowedTables.join(', ')} | Compliance: ${bug.compliance.join(', ')}\n\nReview: (1) boundary cases including == 0, (2) HIPAA — no PHI in logs, (3) ${bug.compliance.includes('CMS Billing') ? 'CMS billing rule accuracy' : 'exception handling'}, (4) test coverage, (5) domain logic accuracy. Give production-readiness confidence score 0-100%.`,
   `Use the jenkins_agent tool to trigger a system test build. Pass as JSON: {"operation": "trigger_build", "branch": "${releaseBranch}", "job": "healthcare-claims"}. Return build status, test summary, and whether all tests pass.`,
@@ -310,7 +310,9 @@ export function Demo(_props: { scrollToTop?: () => void; onTabChange?: (tab: str
       const t0 = Date.now();
       try {
         const prompts = buildPrompts(bug, actualJiraKey, actualReleaseBranch);
-        const result  = await chatApi.send(prompts[i], [], PIPELINE_STEPS[i].persona, bug.id, bug.contextDomain, bug.type.toLowerCase().replace(' ','_'), i === 0);
+        const useDirect = i === 0 || i === 3 || i === 4;
+        const useSingle = !useDirect; // steps 2 (Jira) and 3 (sprint) use tools — single agent
+        const result  = await chatApi.send(prompts[i], [], PIPELINE_STEPS[i].persona, bug.id, bug.contextDomain, bug.type.toLowerCase().replace(' ','_'), useDirect, useSingle);
         const reply   = typeof result === 'string' ? result : (result as any).reply || '';
         const duration = Math.round((Date.now() - t0) / 1000);
         if (i === 1) { const m = reply.match(/\b(ST-\d+)\b/); if (m) actualJiraKey = m[1]; }
@@ -341,7 +343,7 @@ export function Demo(_props: { scrollToTop?: () => void; onTabChange?: (tab: str
       const t0 = Date.now();
       try {
         const prompts = buildPrompts(bug, actualJiraKey, actualReleaseBranch);
-        const result  = await chatApi.send(prompts[5], [], 'tech_lead', bug.id, bug.contextDomain, bug.type.toLowerCase().replace(' ','_'));
+        const result  = await chatApi.send(prompts[5], [], 'tech_lead', bug.id, bug.contextDomain, bug.type.toLowerCase().replace(' ','_'), false, true);
         const reply   = typeof result === 'string' ? result : (result as any).reply || '';
         const duration = Math.round((Date.now() - t0) / 1000);
         const um = reply.match(/https:\/\/github\.com\/[^\s"')]+\/pull\/\d+/);
@@ -378,7 +380,7 @@ export function Demo(_props: { scrollToTop?: () => void; onTabChange?: (tab: str
       const t0 = Date.now();
       try {
         const prompts = buildPrompts(bug, actualJiraKey, actualReleaseBranch);
-        const result  = await chatApi.send(prompts[6], [], 'tech_lead', bug.id, bug.contextDomain);
+        const result  = await chatApi.send(prompts[6], [], 'tech_lead', bug.id, bug.contextDomain, undefined, false, true);
         const reply   = typeof result === 'string' ? result : (result as any).reply || '';
         setStepResults(prev => ({ ...prev, 7: { status: 'done', response: reply, duration: Math.round((Date.now()-t0)/1000) } }));
         setExpandedStep(7);
@@ -395,7 +397,7 @@ export function Demo(_props: { scrollToTop?: () => void; onTabChange?: (tab: str
       const t0 = Date.now();
       try {
         const prompts = buildPrompts(bug, actualJiraKey, actualReleaseBranch);
-        const result  = await chatApi.send(prompts[7], [], 'tech_lead', bug.id, bug.contextDomain);
+        const result  = await chatApi.send(prompts[7], [], 'tech_lead', bug.id, bug.contextDomain, undefined, false, true);
         const reply   = typeof result === 'string' ? result : (result as any).reply || '';
         setStepResults(prev => ({ ...prev, 8: { status: 'done', response: reply, duration: Math.round((Date.now()-t0)/1000) } }));
         setExpandedStep(8);
@@ -415,7 +417,7 @@ export function Demo(_props: { scrollToTop?: () => void; onTabChange?: (tab: str
       const t0 = Date.now();
       try {
         const prompts = buildPrompts(bug, actualJiraKey, actualReleaseBranch);
-        const result  = await chatApi.send(prompts[8], [], 'tech_lead', bug.id, bug.contextDomain);
+        const result  = await chatApi.send(prompts[8], [], 'tech_lead', bug.id, bug.contextDomain, undefined, false, true);
         const reply   = typeof result === 'string' ? result : (result as any).reply || '';
         setStepResults(prev => ({ ...prev, 9: { status: 'done', response: reply, duration: Math.round((Date.now()-t0)/1000) } }));
         setExpandedStep(9);

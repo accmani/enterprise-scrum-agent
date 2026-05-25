@@ -1,4 +1,4 @@
-from langchain.tools import BaseTool
+﻿from langchain_classic.tools import BaseTool
 from pydantic import BaseModel, Field
 from app.config import settings
 import json

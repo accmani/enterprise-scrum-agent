@@ -15,10 +15,10 @@ Each Super Agent is a ScrumMRKLAgent instance configured with:
 
 import asyncio
 
-from langchain.agents import AgentExecutor, create_react_agent
+from langchain_classic.agents import AgentExecutor, create_react_agent
 from langchain_openai import ChatOpenAI, AzureChatOpenAI
-from langchain.prompts import PromptTemplate
-from langchain.tools import BaseTool
+from langchain_classic.prompts import PromptTemplate
+from langchain_classic.tools import BaseTool
 
 from app.config import settings
 from app.agents.personas import SUPER_AGENT_TOOLS
@@ -238,16 +238,13 @@ class ScrumMRKLAgent:
                 agent=agent,
                 tools=tools,
                 verbose=True,
-                max_iterations=5,          # was 20
-                #early_stopping_method="generate",  # add this
+                max_iterations=8,
+                early_stopping_method="generate",
                 handle_parsing_errors=True,
             )
         return self._agent_executor
 
     async def run(self, query: str, session_history=None) -> str:
-        # Escape curly braces so LangChain prompt template doesn't
-        # interpret {} in user input as template variables
-        query = query.replace('{', '{{').replace('}', '}}')
         try:
             executor = self._get_executor()
             result = await asyncio.wait_for(
